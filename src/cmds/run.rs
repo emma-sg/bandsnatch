@@ -185,8 +185,10 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Held for the whole run. Bound to a name rather than discarded so that the
     // lock lives until this function returns; SQLite protects the database, this
-    // protects the library on disk from a concurrent run.
-    let _lock = lock::RunLock::acquire(&lock::lock_path_for(&state_path), !no_wait)?;
+    // protects the library on disk from a concurrent run. Keyed to the output
+    // folder rather than the state database, because the output folder is the
+    // resource being protected.
+    let _lock = lock::RunLock::acquire(&lock::lock_path_for(root), !no_wait)?;
 
     let state: SharedState = Arc::new(Mutex::new(State::open(&state_path)?));
     {
@@ -352,13 +354,21 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     ))
                     .unwrap();
 
-                    let path = album_path.render(
+                    // A layout that cannot produce a safe folder is a per-release
+                    // problem, so skip that release rather than abandoning the run.
+                    let path = match album_path.render(
                         root,
                         &item.artist,
                         &item.title,
                         item.release_year().as_deref(),
                         &id,
-                    );
+                    ) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            warn!("Skipping {id}, cannot build a destination path: {e}");
+                            continue;
+                        }
+                    };
 
                     let content_length = match api.download_item(&item, &path, &audio_format, &m) {
                         Ok(len) => len,

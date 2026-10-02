@@ -11,5 +11,5 @@ cookies.txt
 *.db
 *.db-wal
 *.db-shm
-*.db.lock
+.bandsnatch.lock
 Music/

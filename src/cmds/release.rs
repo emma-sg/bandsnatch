@@ -115,7 +115,8 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         .map(|p| PathBuf::from(shellexpand::tilde(&p).into_owned()))
         .unwrap_or_else(|| root.join(state::STATE_FILENAME));
 
-    let _lock = lock::RunLock::acquire(&lock::lock_path_for(&state_path), !no_wait)?;
+    // Keyed to the output folder, the resource this lock actually protects.
+    let _lock = lock::RunLock::acquire(&lock::lock_path_for(root), !no_wait)?;
 
     let cookies = cookies::get_bandcamp_cookies(cookies_file.as_deref())?;
     let api = api::Api::new(cookies);
@@ -183,7 +184,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         &item.title,
         item.release_year().as_deref(),
         &id,
-    );
+    )?;
     println!(
         "{} {} - {} ({}) -> {}",
         if dry_run {

@@ -45,13 +45,6 @@ pub fn make_string_fs_safe(s: &str) -> String {
     str
 }
 
-pub fn slice_string(s: &str, amt: usize) -> &str {
-    match s.char_indices().nth(amt) {
-        Some((pos, _)) => &s[pos..],
-        None => "",
-    }
-}
-
 // Thanks to https://gist.github.com/NoraCodes/e6d40782b05dc8ac40faf3a0405debd3
 #[derive(Clone)]
 pub struct WorkQueue<T> {

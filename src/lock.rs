@@ -9,11 +9,19 @@ use std::error::Error;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-/// Suffix appended to the state database path to get the lock path.
-pub fn lock_path_for(state_path: &Path) -> PathBuf {
-    let mut name = state_path.as_os_str().to_os_string();
-    name.push(".lock");
-    PathBuf::from(name)
+/// Name of the lock file, created inside the output folder.
+pub const LOCK_FILENAME: &str = ".bandsnatch.lock";
+
+/// Lock file guarding an output folder.
+///
+/// Keyed to the library rather than to the state database: two runs can share
+/// an output folder while `--state`/`BS_STATE` resolves to different files,
+/// which would leave a state-keyed lock ineffective. That includes the
+/// recommended configuration, where the state database lives on fast storage
+/// separate from the media share. The lock protects the output folder, so the
+/// folder is what names it.
+pub fn lock_path_for(root: &Path) -> PathBuf {
+    root.join(LOCK_FILENAME)
 }
 
 /// An exclusive advisory lock held for as long as this value is alive.
@@ -21,13 +29,16 @@ pub fn lock_path_for(state_path: &Path) -> PathBuf {
 /// The lock is released by the operating system when the file descriptor is
 /// closed, so dropping this struct is sufficient and a crashed process cannot
 /// leave a lock behind.
+///
+/// On platforms that are not unix, this does nothing: scheduled runs happen in
+/// containers or from cron, and Windows usage of this tool is interactive.
 pub struct RunLock {
     // Held only to keep the descriptor open.
     _file: File,
 }
 
 impl RunLock {
-    /// Take an exclusive lock, blocking until it is free unless `wait` is false.
+    /// Take the lock at `path`, blocking until it is free unless `wait` is false.
     pub fn acquire(path: &Path, wait: bool) -> Result<Self, Box<dyn Error>> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -71,9 +82,6 @@ fn lock_file(file: &File, wait: bool, path: &Path) -> Result<(), Box<dyn Error>>
     Err(err.into())
 }
 
-/// Advisory locking is implemented for unix only. Scheduled runs happen in
-/// containers or from cron; Windows usage of this tool is interactive, so the
-/// missing lock is a documented limitation rather than a silent one.
 #[cfg(not(unix))]
 fn lock_file(_file: &File, _wait: bool, _path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
@@ -82,14 +90,6 @@ fn lock_file(_file: &File, _wait: bool, _path: &Path) -> Result<(), Box<dyn Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lock_path_is_derived_from_the_state_path() {
-        assert_eq!(
-            lock_path_for(Path::new("/music/.bandsnatch-state.db")),
-            PathBuf::from("/music/.bandsnatch-state.db.lock")
-        );
-    }
 
     #[cfg(unix)]
     #[test]

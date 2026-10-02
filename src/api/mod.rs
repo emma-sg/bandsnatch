@@ -45,6 +45,34 @@ pub struct Api {
     ratelimiter: governor::DefaultDirectRateLimiter,
 }
 
+/// Reduce a `Content-Disposition` filename to a single safe path component.
+///
+/// The value is chosen by the remote server, so it must never select a path.
+/// `Path::join` with an absolute argument discards the base entirely, and `..`
+/// components resolve; either lets a server make a download write - and, for
+/// albums, subsequently delete - a file anywhere the process can reach. Returns
+/// `None` for anything unusable, so the caller reports an error.
+fn safe_download_filename(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('"').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // `file_name` returns `None` for the `.` and `..` components and otherwise
+    // only the final component, collapsing absolute paths and embedded
+    // separators.
+    let component = Path::new(trimmed).file_name()?.to_str()?;
+    if component == "." || component == ".." {
+        return None;
+    }
+
+    let safe = util::make_string_fs_safe(component);
+    if safe.is_empty() {
+        return None;
+    }
+    Some(safe)
+}
+
 impl Api {
     pub fn new(cookies: Vec<cookies::RawCookie>) -> Self {
         let cookie_jar = cookies::fill_cookie_jar(cookies);
@@ -341,6 +369,20 @@ impl Api {
         Ok(())
     }
 
+    /// Download a release's archive for `audio_format` and install it at `path`.
+    ///
+    /// Returns the exact number of bytes transferred.
+    ///
+    /// The archive is unpacked into a staging directory beside `path` and then
+    /// swapped into place, so a failure part-way through never disturbs an
+    /// existing `path`. On failure the staging directory is removed; if that
+    /// removal itself fails, a hidden `.bandsnatch-staging` or
+    /// `.bandsnatch-previous` directory can be left beside `path`. Both are
+    /// harmless, and the next successful download of the same release clears
+    /// them.
+    ///
+    /// Returns an error rather than panicking when the release offers no
+    /// download for `audio_format`: a panic in a worker thread aborts the run.
     pub fn download_item(
         &self,
         item: &DigitalItem,
@@ -348,14 +390,18 @@ impl Api {
         audio_format: &str,
         m: &indicatif::MultiProgress,
     ) -> Result<u64, Box<dyn Error>> {
-        let download_url = &item
+        let Some(download) = item
             .downloads
             .as_ref()
-            .expect("cannot download a release with no downloads")
-            .get(audio_format)
-            .unwrap()
-            .url;
-        let res = self.request(Method::GET, download_url)?;
+            .and_then(|downloads| downloads.get(audio_format))
+        else {
+            return Err(format!(
+                "no {audio_format} download is available for {} - {}",
+                item.artist, item.title
+            )
+            .into());
+        };
+        let res = self.request(Method::GET, &download.url)?;
 
         // Exact transferred size. Recorded alongside the size Bandcamp
         // advertises, which is the value used for change detection.
@@ -370,29 +416,35 @@ impl Api {
                 ),
         );
 
-        let disposition = res.headers().get(CONTENT_DISPOSITION);
-
-        if let None = disposition {
+        let Some(disposition) = res.headers().get(CONTENT_DISPOSITION) else {
             pb.finish_and_clear();
             return Err(
-                format!("could not download {full_title} when using url `{download_url}`").into(),
+                format!(
+                    "could not download {full_title} when using url `{}`",
+                    download.url
+                )
+                .into(),
             );
-        }
+        };
 
         // `HeaderValue::to_str` only handles valid ASCII bytes, and Bandcamp
         // chooses to put Unicode into the content-disposition for some reason,
         // so need to handle ourselves.
-        let content = str::from_utf8(disposition.unwrap().as_bytes())?;
-        // Should probably use a thing to properly parse the content of content disposition.
-        let filename = util::slice_string(
-            content
-                .split("; ")
-                .find(|x| x.starts_with("filename="))
-                .unwrap(),
-            9,
-        )
-        .trim_matches('"')
-        .to_string();
+        let content = str::from_utf8(disposition.as_bytes())?;
+        // Not a complete Content-Disposition parser: `filename*=` (RFC 5987) and
+        // other shapes are ignored rather than mis-parsed, and a missing or
+        // unusable filename is an error.
+        let Some(filename) = content
+            .split(';')
+            .find_map(|part| part.trim().strip_prefix("filename="))
+            .and_then(safe_download_filename)
+        else {
+            pb.finish_and_clear();
+            return Err(format!(
+                "could not read a usable filename from the Content-Disposition header `{content}` for {full_title}"
+            )
+            .into());
+        };
 
         let target = path;
         let parent = target
@@ -443,5 +495,47 @@ impl Api {
         m.println(format!("(Done) {full_title}"))?;
 
         Ok(len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_download_filename;
+
+    #[test]
+    fn download_filenames_cannot_select_a_path() {
+        // The filename comes from the remote server. Absolute paths and
+        // traversal must collapse to a single inert component: `Path::join` with
+        // an absolute argument replaces the base, and `..` resolves, so either
+        // would let a server write outside the staging directory.
+        assert_eq!(
+            safe_download_filename("../../../.bashrc").as_deref(),
+            Some(".bashrc")
+        );
+        assert_eq!(
+            safe_download_filename("/etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            safe_download_filename("sub/dir/track.flac").as_deref(),
+            Some("track.flac")
+        );
+        // Windows separators are inert on unix, where they are just a character.
+        assert_eq!(
+            safe_download_filename("Album \\ Deluxe.zip").as_deref(),
+            Some("Album ⧹ Deluxe.zip")
+        );
+        // Quoted values are unwrapped, as they appear in the header.
+        assert_eq!(
+            safe_download_filename("\"track.flac\"").as_deref(),
+            Some("track.flac")
+        );
+
+        // Unusable values are rejected rather than guessed at.
+        assert_eq!(safe_download_filename(".."), None);
+        assert_eq!(safe_download_filename("."), None);
+        assert_eq!(safe_download_filename(""), None);
+        assert_eq!(safe_download_filename("   "), None);
+        assert_eq!(safe_download_filename("\"\""), None);
     }
 }
