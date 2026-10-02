@@ -1,0 +1,15 @@
+target/
+.git/
+.github/
+.vscode/
+test/
+
+# Credentials, caches, and downloaded audio stay out of image layers.
+cookies.json
+cookies.txt
+*.cache
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+Music/
