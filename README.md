@@ -222,6 +222,11 @@ If you don't provide the `--cookies` option, Bandsnatch will attempt to
 automatically find a file named `cookies.json` or `cookies.txt` in the local
 directory and load it.
 
+These cookies are full session credentials: anything that can read the file can
+log in as you, including to make purchases. Keep it out of shared directories
+and backups, and set it to `0600` (`chmod 600 cookies.txt`). Bandsnatch reads
+the file but does not, and cannot, enforce its permissions.
+
 <!-- Failing that, if you use Firefox on Windows or Linux,
 bandsnatch will try to automatically load the cookies from there if possible
 (TODO). -->
