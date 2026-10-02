@@ -25,7 +25,7 @@ pub struct BandcampPage {
     pub download_urls: HashMap<String, CollectionDownload>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CollectionDownload {
     pub url: String,
     pub is_preorder: bool,
@@ -312,13 +312,42 @@ impl Api {
         Ok(item)
     }
 
+    /// Unpack a download into a staging directory.
+    ///
+    /// Albums arrive as a zip that is expanded in place; singles are kept as
+    /// the transferred file. Everything happens inside `staging` so that a
+    /// failure never touches the live library.
+    fn unpack_into(
+        &self,
+        staging: &Path,
+        stream: &mut reqwest::Response,
+        pb: &indicatif::ProgressBar,
+        item: &DigitalItem,
+        filename: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let full_path = staging.join(filename);
+        {
+            let mut file = File::create(&full_path)?;
+            util::copy_with_progress(stream, &mut file, pb)?;
+        }
+
+        if !item.is_single() {
+            let file = File::open(&full_path)?;
+            let reader = BufReader::new(file);
+            let mut archive = zip::ZipArchive::new(reader)?;
+            archive.extract(staging)?;
+            fs::remove_file(&full_path)?;
+        }
+        Ok(())
+    }
+
     pub fn download_item(
         &self,
         item: &DigitalItem,
-        path: &str,
+        path: &Path,
         audio_format: &str,
         m: &indicatif::MultiProgress,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<u64, Box<dyn Error>> {
         let download_url = &item
             .downloads
             .as_ref()
@@ -328,7 +357,9 @@ impl Api {
             .url;
         let res = self.request(Method::GET, download_url)?;
 
-        let len = res.content_length().unwrap();
+        // Exact transferred size. Recorded alongside the size Bandcamp
+        // advertises, which is the value used for change detection.
+        let len = res.content_length().unwrap_or(0);
         let full_title = format!("{} - {}", item.title, item.artist);
         let pb = m.add(
             indicatif::ProgressBar::new(len)
@@ -360,37 +391,57 @@ impl Api {
                 .unwrap(),
             9,
         )
-        .trim_matches('"');
-        m.suspend(|| debug!("Downloading as `{filename}` to `{path}`"));
+        .trim_matches('"')
+        .to_string();
 
-        // TODO: drop file with `.part` extension instead, while downloading, and then rename when finished?.
+        let target = path;
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("output path `{}` has no parent directory", path.display()))?;
+        let name = target
+            .file_name()
+            .ok_or_else(|| format!("output path `{}` has no final component", path.display()))?
+            .to_string_lossy()
+            .into_owned();
 
-        let full_path = Path::new(path).join(filename);
-        let mut file = File::create(&full_path)?;
+        m.suspend(|| debug!("Downloading as `{filename}` for `{}`", path.display()));
+
+        // Download and unpack into a sibling staging directory, then swap it
+        // into place. A first download has nothing to lose, but re-downloading
+        // an updated release must not destroy the existing copy if the transfer
+        // or the unzip fails part-way through.
+        //
+        // Staging is a sibling of the target rather than a system temp path so
+        // that the final rename stays within one filesystem.
+        fs::create_dir_all(parent)?;
+        let staging = parent.join(format!(".{name}.bandsnatch-staging"));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        fs::create_dir_all(&staging)?;
+
         let mut stream = res;
         m.suspend(|| debug!("Starting download"));
 
-        util::copy_with_progress(&mut stream, &mut file, &pb)?;
+        if let Err(err) = self.unpack_into(&staging, &mut stream, &pb, item, &filename) {
+            pb.finish_and_clear();
+            let _ = fs::remove_dir_all(&staging);
+            return Err(err);
+        }
+
         pb.set_position(len);
 
-        // Close downloaded file.
-        drop(file);
-
-        if !item.is_single() {
-            m.suspend(|| debug!("Unzipping album"));
-            let file = File::open(&full_path)?;
-            let reader = BufReader::new(file);
-            let mut archive = zip::ZipArchive::new(reader)?;
-
-            archive.extract(path)?;
-            fs::remove_file(&full_path)?;
-            m.suspend(|| debug!("Unzipped and removed original archive"));
+        if let Err(err) = util::replace_directory(target, &staging) {
+            // Leave no staging debris behind. The existing release is intact.
+            let _ = fs::remove_dir_all(&staging);
+            pb.finish_and_clear();
+            return Err(err.into());
         }
-        // Cover folder downloading for singles
+        m.suspend(|| debug!("Replaced `{}` with the new download", path.display()));
 
         pb.finish_and_clear();
         m.println(format!("(Done) {full_title}"))?;
 
-        Ok(())
+        Ok(len)
     }
 }

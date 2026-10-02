@@ -1,7 +1,9 @@
 mod api;
-mod cache;
 mod cmds;
 mod cookies;
+mod library;
+mod lock;
+mod state;
 mod util;
 
 #[macro_use]
@@ -23,8 +25,10 @@ struct Args {
 enum Commands {
     /// Run Bandsnatch to download your collection.
     Run(cmds::run::Args),
-    DebugCollection(cmds::debug_collection::Args), // Get the raw JSON of a specific Bandcamp release for debugging.
-                                                   // Release(cmds::release::Args),
+    /// Re-download a single release, bypassing the state cache.
+    Release(cmds::release::Args),
+    /// Get the raw JSON of your Bandcamp collection page for debugging.
+    DebugCollection(cmds::debug_collection::Args),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,12 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::default().filter_or(DEFAULT_FILTER_ENV, "bandsnatch=info");
     env_logger::init_from_env(env);
 
-    // TODO: if no subcommands in env args, push `run` in front and parse from them.
     let args = Args::parse();
 
     match args.command {
         Commands::Run(cmd_args) => cmds::run::command(cmd_args),
+        Commands::Release(cmd_args) => cmds::release::command(cmd_args),
         Commands::DebugCollection(cmd_args) => cmds::debug_collection::command(cmd_args),
-        // Commands::Release(cmd_args) => cmds::release::command(cmd_args).await,
     }
 }

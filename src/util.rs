@@ -1,7 +1,9 @@
 use phf::phf_map;
 use std::{
     collections::VecDeque,
+    fs,
     io::{self, Read, Write},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -29,7 +31,14 @@ pub fn make_string_fs_safe(s: &str) -> String {
         str = str.replace(from, to);
     }
 
-    if UNSAFE_NTFS_ENDINGS.contains(&str.chars().last().unwrap()) {
+    // Callers pass empty strings: a release with no reported year renders an
+    // empty `{year}` value. An empty name has no trailing character
+    // to inspect, so the check must handle it rather than unwrap.
+    if str
+        .chars()
+        .last()
+        .is_some_and(|last| UNSAFE_NTFS_ENDINGS.contains(&last))
+    {
         str.push('_');
     }
 
@@ -118,5 +127,134 @@ where
         writer.write_all(&buf[..len])?;
         written += len as u64;
         pb.set_position(written);
+    }
+}
+
+/// Atomically replace `target` with the fully prepared `staging` directory.
+///
+/// The two must share a parent so the rename stays within one filesystem. If the
+/// swap fails, any pre-existing `target` is put back: a failed re-download must
+/// never leave the library missing a release it previously had.
+pub fn replace_directory(target: &Path, staging: &Path) -> io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("target path has no parent directory"))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::other("target path has no final component"))?
+        .to_string_lossy();
+
+    let previous = parent.join(format!(".{name}.bandsnatch-previous"));
+    if previous.exists() {
+        fs::remove_dir_all(&previous)?;
+    }
+
+    let had_previous = target.exists();
+    if had_previous {
+        fs::rename(target, &previous)?;
+    }
+
+    if let Err(err) = fs::rename(staging, target) {
+        if had_previous {
+            // Best effort: the original rename failure is the more useful error.
+            let _ = fs::rename(&previous, target);
+        }
+        return Err(err);
+    }
+
+    if had_previous {
+        fs::remove_dir_all(&previous)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bandsnatch-util-{label}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn make_string_fs_safe_tolerates_empty_input() {
+        // Used to panic: there is no trailing character to test.
+        assert_eq!(make_string_fs_safe(""), "");
+    }
+
+    #[test]
+    fn make_string_fs_safe_appends_an_underscore_for_ntfs_unsafe_endings() {
+        assert_eq!(make_string_fs_safe("Album."), "Album._");
+        assert_eq!(make_string_fs_safe("Album "), "Album _");
+        assert_eq!(make_string_fs_safe("Album"), "Album");
+    }
+
+    #[test]
+    fn make_string_fs_safe_replaces_path_separators() {
+        assert_eq!(make_string_fs_safe("AC/DC"), "AC／DC");
+    }
+
+    #[test]
+    fn replace_directory_swaps_in_new_content_and_leaves_no_debris() {
+        let root = temp_dir("swap");
+        let target = root.join("Album");
+        let staging = root.join(".Album.bandsnatch-staging");
+
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.flac"), b"old").unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("new.flac"), b"new").unwrap();
+
+        replace_directory(&target, &staging).unwrap();
+
+        assert_eq!(fs::read(target.join("new.flac")).unwrap(), b"new");
+        assert!(!target.join("old.flac").exists());
+        assert!(!staging.exists());
+        assert!(!root.join(".Album.bandsnatch-previous").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn replace_directory_creates_the_target_when_there_was_nothing_before() {
+        let root = temp_dir("fresh");
+        let target = root.join("Album");
+        let staging = root.join(".Album.bandsnatch-staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("new.flac"), b"new").unwrap();
+
+        replace_directory(&target, &staging).unwrap();
+
+        assert_eq!(fs::read(target.join("new.flac")).unwrap(), b"new");
+        assert!(!staging.exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_swap_leaves_the_existing_release_intact() {
+        // This is the entire reason downloads are staged: a re-download that
+        // fails must not cost the user the copy they already had.
+        let root = temp_dir("failed");
+        let target = root.join("Album");
+        let staging = root.join(".Album.bandsnatch-staging");
+
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.flac"), b"old").unwrap();
+        // Deliberately do not create `staging`, so the final rename fails.
+
+        assert!(replace_directory(&target, &staging).is_err());
+
+        assert_eq!(fs::read(target.join("old.flac")).unwrap(), b"old");
+        assert!(!root.join(".Album.bandsnatch-previous").exists());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }
