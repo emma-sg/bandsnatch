@@ -397,16 +397,23 @@ impl Api {
         else {
             return Err(format!(
                 "no {audio_format} download is available for {} - {}",
-                item.artist, item.title
+                util::display_safe(&item.artist),
+                util::display_safe(&item.title)
             )
             .into());
         };
         let res = self.request(Method::GET, &download.url)?;
 
-        // Exact transferred size. Recorded alongside the size Bandcamp
-        // advertises, which is the value used for change detection.
+        // Exact transferred size, recorded alongside the size Bandcamp
+        // advertises. That advertised size is the one used for change detection.
         let len = res.content_length().unwrap_or(0);
-        let full_title = format!("{} - {}", item.title, item.artist);
+        // Metadata is artist-controlled and every message below reaches a
+        // terminal or a log, so strip anything that could manipulate either.
+        let full_title = format!(
+            "{} - {}",
+            util::display_safe(&item.title),
+            util::display_safe(&item.artist)
+        );
         let pb = m.add(
             indicatif::ProgressBar::new(len)
                 .with_message(full_title.clone())
@@ -441,7 +448,8 @@ impl Api {
         else {
             pb.finish_and_clear();
             return Err(format!(
-                "could not read a usable filename from the Content-Disposition header `{content}` for {full_title}"
+                "could not read a usable filename from the Content-Disposition header `{}` for {full_title}",
+                util::display_safe(content)
             )
             .into());
         };
@@ -501,13 +509,123 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::safe_download_filename;
+    use std::path::PathBuf;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bandsnatch-api-{label}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Build an in-memory zip from `(name, contents, unix mode)` entries.
+    fn zip_bytes(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut buffer = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
+            for (name, contents, mode) in entries {
+                let options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored)
+                    .unix_permissions(*mode);
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(contents).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        buffer
+    }
+
+    /// Archive member names are hostile input: extraction must never write
+    /// outside the staging directory.
+    #[test]
+    fn archive_extraction_cannot_write_outside_the_staging_directory() {
+        let root = temp_dir("zip-slip");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let escape = root.join("escaped.txt");
+
+        let bytes = zip_bytes(&[
+            ("../escaped.txt", b"pwned", 0o644),
+            ("a/../../escaped.txt", b"pwned", 0o644),
+            (escape.to_str().unwrap(), b"pwned", 0o644),
+            ("ok.txt", b"fine", 0o644),
+        ]);
+
+        // Same call as `unpack_into`. Whether the crate rejects the archive or
+        // skips the hostile entries is its business; writing outside staging is
+        // not.
+        let result = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..]))
+            .and_then(|mut archive| archive.extract(&staging));
+
+        assert!(
+            !escape.exists(),
+            "a crafted archive entry escaped the staging directory"
+        );
+        assert!(
+            !root.join("a").exists(),
+            "a crafted archive entry created a directory outside staging"
+        );
+        // This guard stops the test above from passing for no reason. Today the
+        // crate refuses the whole archive (`Invalid file path`), so nothing is
+        // extracted and the assertions pass without proving anything. If a later
+        // version skips the hostile entries instead, the harmless file still has
+        // to be extracted.
+        assert!(
+            result.is_err() || staging.join("ok.txt").exists(),
+            "extraction processed nothing, so this test proves nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A symlink entry pointing outside staging, followed by a file that would
+    /// be written through it.
+    #[test]
+    fn archive_extraction_cannot_be_redirected_through_a_symlinked_directory() {
+        let root = temp_dir("zip-symlink");
+        let staging = root.join("staging");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let bytes = zip_bytes(&[
+            // 0o120777 == S_IFLNK | 0777, pointing at a directory outside staging.
+            ("sub", outside.to_str().unwrap().as_bytes(), 0o120777),
+            ("sub/evil.txt", b"pwned", 0o644),
+        ]);
+
+        let _ = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..]))
+            .and_then(|mut archive| archive.extract(&staging));
+
+        assert!(
+            !outside.join("evil.txt").exists(),
+            "extraction followed a symlink out of the staging directory"
+        );
+        // The crate treats a symlink entry as a plain file, so the following
+        // entry fails with AlreadyExists and nothing is written through it.
+        // Assert the entry is never materialised as a symlink, because a later
+        // entry could traverse one.
+        assert!(
+            !std::fs::symlink_metadata(staging.join("sub"))
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false),
+            "an archive symlink entry was materialised and could be traversed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn download_filenames_cannot_select_a_path() {
-        // The filename comes from the remote server. Absolute paths and
-        // traversal must collapse to a single inert component: `Path::join` with
-        // an absolute argument replaces the base, and `..` resolves, so either
-        // would let a server write outside the staging directory.
+        // The filename comes from the remote server. Absolute paths and traversal
+        // must collapse to a single filename: `Path::join` with an
+        // absolute argument replaces the base and `..` resolves, so either would
+        // let a server write outside the staging directory.
         assert_eq!(
             safe_download_filename("../../../.bashrc").as_deref(),
             Some(".bashrc")
@@ -520,7 +638,7 @@ mod tests {
             safe_download_filename("sub/dir/track.flac").as_deref(),
             Some("track.flac")
         );
-        // Windows separators are inert on unix, where they are just a character.
+        // Windows separators are ordinary characters on unix.
         assert_eq!(
             safe_download_filename("Album \\ Deluxe.zip").as_deref(),
             Some("Album ⧹ Deluxe.zip")

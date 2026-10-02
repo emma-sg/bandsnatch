@@ -45,6 +45,27 @@ pub fn make_string_fs_safe(s: &str) -> String {
     str
 }
 
+/// Remove characters that could control a terminal or fake a log line.
+///
+/// Release titles, artist names and track names come from Bandcamp metadata,
+/// which an artist controls. Printed raw, an escape sequence can clear the
+/// screen, set the window title, or set the operator's clipboard via OSC 52,
+/// and a newline can add a log line that looks like a success. Bidi overrides
+/// are removed because they reorder displayed text, so a name can read as
+/// something it is not.
+///
+/// This is for text bound for a human or a log. It is not applied to filenames:
+/// those go through `make_string_fs_safe`, and rewriting a name on disk would
+/// orphan folders.
+pub fn display_safe(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .collect()
+}
+
 // Thanks to https://gist.github.com/NoraCodes/e6d40782b05dc8ac40faf3a0405debd3
 #[derive(Clone)]
 pub struct WorkQueue<T> {
@@ -177,8 +198,29 @@ mod tests {
     }
 
     #[test]
+    fn display_safe_strips_terminal_and_log_control_characters() {
+        // An artist controls these strings. Printed raw, ESC starts an escape
+        // sequence (here OSC 52, which sets the clipboard in many terminals) and
+        // a newline can add a fake log line.
+        assert_eq!(
+            display_safe("Album\x1b]52;c;cGF3bmVk\x07"),
+            "Album]52;c;cGF3bmVk"
+        );
+        assert_eq!(
+            display_safe("Album\nINFO bandsnatch: Imported 99 entries"),
+            "AlbumINFO bandsnatch: Imported 99 entries"
+        );
+        assert_eq!(display_safe("Album\tName"), "AlbumName");
+        // Bidi overrides reorder displayed text, so a name can read as another.
+        assert_eq!(display_safe("Album\u{202e}gnp.txt"), "Albumgnp.txt");
+        assert_eq!(display_safe("Album\u{2066}x\u{2069}"), "Albumx");
+        // Ordinary text is untouched, including characters outside ASCII.
+        assert_eq!(display_safe("Björk – Utopía (2022)"), "Björk – Utopía (2022)");
+    }
+
+    #[test]
     fn make_string_fs_safe_tolerates_empty_input() {
-        // Used to panic: there is no trailing character to test.
+        // An empty string has no trailing character to test.
         assert_eq!(make_string_fs_safe(""), "");
     }
 

@@ -1,12 +1,14 @@
 //! Persistent per-release state.
 //!
-//! This replaces the append-only `bandcamp-collection-downloader.cache` text
-//! file. That format stored our bookkeeping inside a free-text description
-//! field that also holds user-controlled release titles and artists, so
-//! recovering structured metadata (a content fingerprint, a check timestamp)
-//! from it would mean disambiguating our own data from arbitrary text. SQLite
-//! gives us typed columns, atomic per-release updates, and safe concurrent
-//! access from the download workers.
+//! The legacy append-only `bandcamp-collection-downloader.cache` text file
+//! kept bookkeeping inside a free-text description field shared with
+//! user-controlled titles and artists, so structured metadata (a content
+//! fingerprint, a check timestamp) could not be recovered from it without
+//! separating tool data from arbitrary text. This store uses typed columns,
+//! atomic per-release updates, and allows concurrent access from the download
+//! workers.
+
+use crate::util;
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -95,13 +97,13 @@ pub struct StateEntry {
     pub release_year: Option<String>,
     pub format: Option<String>,
     pub state: ItemState,
-    /// Size Bandcamp advertised for the archive at download time. This is the
-    /// cheap change signal: it comes from the download page, so comparing it
-    /// costs one request and no transfer.
+    /// Size Bandcamp advertised for the archive at download time. It comes
+    /// from the download page, so comparing it costs one request and no
+    /// transfer.
     pub size_mb: Option<String>,
-    /// Exact byte count of the archive we actually transferred. Recorded for
-    /// diagnostics; `size_mb` is what drives change detection because it can be
-    /// read without downloading.
+    /// Exact byte count of the archive transferred. Recorded for diagnostics;
+    /// `size_mb` drives change detection because it can be read without
+    /// downloading.
     pub content_length: Option<i64>,
     pub description: String,
     pub downloaded_at: Option<String>,
@@ -109,8 +111,8 @@ pub struct StateEntry {
 }
 
 impl StateEntry {
-    /// A freshly downloaded release, with the fingerprint Bandcamp is
-    /// advertising right now.
+    /// A freshly downloaded release, with the fingerprint Bandcamp advertised
+    /// at download time.
     #[allow(clippy::too_many_arguments)]
     pub fn downloaded(
         id: &str,
@@ -123,6 +125,12 @@ impl StateEntry {
         is_preorder: bool,
         now: DateTime<Utc>,
     ) -> Self {
+        // The structured columns hold the metadata as reported; the description
+        // is the human-readable field, so it is the one that gets
+        // display-sanitised.
+        let display_title = util::display_safe(title);
+        let display_artist = util::display_safe(artist);
+
         Self {
             id: id.to_string(),
             artist: Some(artist.to_string()),
@@ -137,8 +145,8 @@ impl StateEntry {
             size_mb,
             content_length: content_length.map(|len| len as i64),
             description: match release_year {
-                Some(year) => format!("{title} ({year}) by {artist}"),
-                None => format!("{title} by {artist}"),
+                Some(year) => format!("{display_title} ({year}) by {display_artist}"),
+                None => format!("{display_title} by {display_artist}"),
             },
             downloaded_at: Some(now.to_rfc3339()),
             checked_at: Some(now.to_rfc3339()),
@@ -375,6 +383,12 @@ impl State {
     /// One-time import of the legacy text cache so an existing library is not
     /// re-downloaded from scratch. The file itself is left untouched: it may
     /// belong to another tool, and deleting it is not ours to decide.
+    ///
+    /// Call this before the first [`RecheckPolicy`] decision of a run. The import
+    /// only inserts rows, so an import that happened after the decisions were
+    /// taken would let releases it covers be treated as unknown and downloaded
+    /// again. The once-only behaviour is enforced internally by a `meta` row, so
+    /// calling it more than once is harmless.
     pub fn import_legacy_cache(&self, dir: &Path) -> Result<usize, Box<dyn Error>> {
         if self.meta_get("legacy_imported")?.is_some() || !self.is_empty()? {
             return Ok(0);

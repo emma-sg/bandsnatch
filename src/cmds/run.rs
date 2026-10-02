@@ -332,10 +332,18 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         m.suspend(|| {
-                            info!("{id} advertised size changed, re-downloading: {} - {}", item.title, item.artist)
+                            info!(
+                                "{id} advertised size changed, re-downloading: {} - {}",
+                                util::display_safe(&item.title),
+                                util::display_safe(&item.artist)
+                            )
                         });
                         if let Ok(mut list) = updated.lock() {
-                            list.push(format!("{id}, {} - {}", item.title, item.artist));
+                            list.push(format!(
+                                "{id}, {} - {}",
+                                util::display_safe(&item.title),
+                                util::display_safe(&item.artist)
+                            ));
                         }
                     }
 
@@ -348,8 +356,8 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
                     m.println(format!(
                         "Trying {id}, {} - {} ({:?})",
-                        item.title,
-                        item.artist,
+                        util::display_safe(&item.title),
+                        util::display_safe(&item.artist),
                         item.is_single(),
                     ))
                     .unwrap();

@@ -5,6 +5,7 @@ use crate::{
     library::AlbumPath,
     lock,
     state::{self, ItemState, State, StateEntry},
+    util,
 };
 use chrono::Utc;
 use clap::{builder::PossibleValuesParser, Args as ClapArgs};
@@ -192,8 +193,8 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         } else {
             "Re-downloading"
         },
-        item.artist,
-        item.title,
+        util::display_safe(&item.artist),
+        util::display_safe(&item.title),
         audio_format,
         path.display()
     );
