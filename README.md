@@ -174,8 +174,21 @@ docker run -d \
   bandsnatch:local
 ```
 
-The container only supervises the same one-shot CLI, which is what makes one-off
-runs and on-demand re-downloads work without a second entry point:
+A prebuilt image is published to GHCR on every push to `main` and on version
+tags, so a NAS can pull one instead of building anything:
+
+```
+docker pull ghcr.io/emma-sg/bandsnatch:latest
+```
+
+`:latest` tracks `main`. Version tags also publish `1`, `1.2` and `1.2.3`, so pin
+one of those if you would rather the image only change when you say so. The
+package has to be public for an unauthenticated pull; if `docker pull` asks for
+credentials, set its visibility in the repository's package settings. On Unraid,
+the image goes in the template's Repository field.
+
+The container only supervises the same one-shot CLI, so one-off runs and
+on-demand re-downloads work without a second entry point:
 
 ```
 docker run --rm bandsnatch:local run --dry-run -f flac -o /music you
