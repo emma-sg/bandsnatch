@@ -324,42 +324,39 @@ impl Api {
         let text = self.request(Method::GET, url)?.text()?;
         let soup = Soup::new(&text);
 
-        let download_page_blob = soup
-            .attr("id", "pagedata")
-            .find()
-            .expect(&format!(
-                "could not find `pagedata` element for digital item {url}"
-            ))
-            .get("data-blob")
-            .expect(&format!(
-                "could not extract `data-blob` from the pagedata element for digital item {url}"
-            ));
+        // Errors, not panics: a download page can be an interstitial or a markup
+        // change, and this runs on a worker thread. A panic there poisons the
+        // queue and `thread::scope(..).unwrap()` re-raises it, taking the whole
+        // run down instead of skipping one release.
+        let blob_element = soup.attr("id", "pagedata").find().ok_or_else(|| {
+            format!("could not find the `pagedata` element for digital item {url}")
+        })?;
+        let download_page_blob = blob_element.get("data-blob").ok_or_else(|| {
+            format!("could not extract `data-blob` from the pagedata element for digital item {url}")
+        })?;
 
-        let item_result = std::panic::catch_unwind(|| {
-            serde_json::from_str::<ParsedItemsData>(&download_page_blob).unwrap()
-        });
+        let parsed = match serde_json::from_str::<ParsedItemsData>(&download_page_blob) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                println!("Failed to get item info for {url}.");
+                if *debug {
+                    println!("\n{download_page_blob}\n");
+                } else {
+                    println!("Run with `--debug` to see the full JSON blob.\n")
+                }
 
-        if item_result.is_err() {
-            println!("Failed to get item info for {url}.");
-            if *debug {
-                println!("\n{download_page_blob}\n");
-            } else {
-                println!("Run with `--debug` to see the full JSON blob.\n")
+                return Err(format!("failed parsing {url}: {err}").into());
             }
+        };
 
-            bail!(format!("failed parsing {url}"));
-        }
-
-        let item = item_result.unwrap().digital_items.first().cloned();
-
-        Ok(item)
+        Ok(parsed.digital_items.first().cloned())
     }
 
     /// Unpack a download into a staging directory.
     ///
-    /// Albums arrive as a zip that is expanded in place; singles are kept as
-    /// the transferred file. Everything happens inside `staging` so that a
-    /// failure never touches the live library.
+    /// Albums arrive as a zip that is expanded in place; singles are kept as the
+    /// transferred file. Everything happens inside `staging`, so a failure never
+    /// touches the live library.
     fn unpack_into(
         &self,
         staging: &Path,
