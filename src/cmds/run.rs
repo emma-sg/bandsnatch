@@ -51,7 +51,16 @@ pub struct Args {
     /// Bandcamp does not change a purchase ID when an artist replaces a
     /// release's audio, so the only way to notice is to poll the download page
     /// and compare the advertised archive size.
-    #[arg(long, value_name = "DAYS", env = "BS_RECHECK_AFTER")]
+    ///
+    /// Bounded to reject negatives, which would make every release due on every
+    /// run, and values large enough to overflow chrono's `Duration::days`, which
+    /// panics.
+    #[arg(
+        long,
+        value_name = "DAYS",
+        env = "BS_RECHECK_AFTER",
+        value_parser = clap::value_parser!(i64).range(0..=36500)
+    )]
     recheck_after: Option<i64>,
 
     /// Re-check every downloaded release during this run, downloading only the
@@ -61,7 +70,16 @@ pub struct Args {
     recheck_all: bool,
 
     /// The amount of parallel jobs (threads) to use.
-    #[arg(short, long, default_value_t = 4, env = "BS_JOBS")]
+    ///
+    /// At least one: zero workers would process nothing and still report
+    /// success.
+    #[arg(
+        short,
+        long,
+        default_value_t = 4,
+        env = "BS_JOBS",
+        value_parser = clap::value_parser!(u8).range(1..=255)
+    )]
     jobs: u8,
 
     /// Maximum number of releases to process. Useful for testing.
@@ -257,18 +275,15 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                                 util::display_safe(&item.artist)
                             )
                         });
-                        if let Ok(mut list) = updated.lock() {
-                            list.push(format!(
-                                "{id}, {} - {}",
-                                util::display_safe(&item.title),
-                                util::display_safe(&item.artist)
-                            ));
-                        }
                     }
 
                     if dry_run {
                         if let Ok(mut results) = dry_run_results.lock() {
-                            results.push(format!("{id}, {} - {}", item.title, item.artist));
+                            results.push(format!(
+                                "{id}, {} - {}",
+                                util::display_safe(&item.title),
+                                util::display_safe(&item.artist)
+                            ));
                         }
                         continue;
                     }
@@ -301,12 +316,24 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     {
                         Ok(len) => len,
                         Err(e) => {
-                            // A failed download is deliberately not recorded, so
-                            // the next run retries it.
+                            // A failed download is not recorded, so the next run
+                            // retries it.
                             warn!("Failed to download {id}: {e}; skipped.");
                             continue;
                         }
                     };
+
+                    // Recorded only now: a re-download that failed must not be
+                    // reported as having been updated.
+                    if action == Action::Recheck {
+                        if let Ok(mut list) = updated.lock() {
+                            list.push(format!(
+                                "{id}, {} - {}",
+                                util::display_safe(&item.title),
+                                util::display_safe(&item.artist)
+                            ));
+                        }
+                    }
 
                     let record = StateEntry::downloaded(
                         &id,
