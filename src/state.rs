@@ -322,6 +322,14 @@ impl State {
 
     pub fn get(&self, id: &str) -> Result<Option<StateEntry>, Box<dyn Error>> {
         let conn = self.conn()?;
+        Self::get_with(&conn, id)
+    }
+
+    /// Read one row using an already-held connection.
+    ///
+    /// Associated rather than a method because the mutex is not reentrant, so a
+    /// method that locked again while a lock was held would deadlock.
+    fn get_with(conn: &Connection, id: &str) -> Result<Option<StateEntry>, Box<dyn Error>> {
         Ok(conn
             .query_row(
                 "SELECT id, artist, title, release_year, format, state, size_mb,
@@ -353,6 +361,10 @@ impl State {
 
     pub fn upsert(&self, entry: &StateEntry) -> Result<(), Box<dyn Error>> {
         let conn = self.conn()?;
+        Self::upsert_with(&conn, entry)
+    }
+
+    fn upsert_with(conn: &Connection, entry: &StateEntry) -> Result<(), Box<dyn Error>> {
         conn.execute(
             "INSERT INTO items (id, artist, title, release_year, format, state,
                                 size_mb, content_length, description,
@@ -386,7 +398,30 @@ impl State {
         Ok(())
     }
 
-    /// Record that we looked at a release and its fingerprint had not changed.
+    /// Record that Bandcamp had no usable download for a purchase.
+    ///
+    /// Does not overwrite a row that already records a completed download.
+    /// `get_digital_item` returning nothing is often transient - a hiccup, an
+    /// expired session, an interstitial page - and demoting a downloaded release
+    /// to `Skipped` would erase its size fingerprint and drop it out of change
+    /// detection permanently, because `Skipped` is never retried.
+    ///
+    /// Returns whether a row was written.
+    pub fn record_unavailable(&self, entry: &StateEntry) -> Result<bool, Box<dyn Error>> {
+        let conn = self.conn()?;
+
+        if let Some(existing) = Self::get_with(&conn, &entry.id)? {
+            // `downloaded_at` is only ever set by a successful download.
+            if existing.downloaded_at.is_some() {
+                return Ok(false);
+            }
+        }
+
+        Self::upsert_with(&conn, entry)?;
+        Ok(true)
+    }
+
+    /// Record that a release was checked and its fingerprint had not changed.
     pub fn touch_checked(&self, id: &str, now: DateTime<Utc>) -> Result<(), Box<dyn Error>> {
         let conn = self.conn()?;
         conn.execute(
@@ -396,15 +431,15 @@ impl State {
         Ok(())
     }
 
-    /// One-time import of the legacy text cache so an existing library is not
-    /// re-downloaded from scratch. The file itself is left untouched: it may
-    /// belong to another tool, and deleting it is not ours to decide.
+    /// One-time import of the legacy text cache, so a library that already
+    /// exists is not downloaded again. The file is left untouched: it may
+    /// belong to another tool, and deleting it is out of scope.
     ///
-    /// Call this before the first [`RecheckPolicy`] decision of a run. The import
-    /// only inserts rows, so an import that happened after the decisions were
-    /// taken would let releases it covers be treated as unknown and downloaded
-    /// again. The once-only behaviour is enforced internally by a `meta` row, so
-    /// calling it more than once is harmless.
+    /// Call this before the first [`RecheckPolicy`] decision of a run. The
+    /// import only inserts rows, so running it after the decisions were taken
+    /// would let the releases it covers be treated as unknown and downloaded
+    /// again. A `meta` row enforces the once-only behaviour, so calling it more
+    /// than once is safe.
     pub fn import_legacy_cache(&self, dir: &Path) -> Result<usize, Box<dyn Error>> {
         // One lock for the whole import. The mutex is not reentrant, and the
         // check-then-insert sequence should not interleave with another writer.
@@ -449,7 +484,12 @@ impl State {
             )?;
             imported += inserted;
         }
-        Self::meta_set(&conn, "legacy_imported", &Utc::now().to_rfc3339())?;
+        // Only mark the import done if it produced rows. A file that exists but
+        // is empty or half-written (another tool still appending to it) would
+        // otherwise be ignored forever once the marker is set.
+        if imported > 0 {
+            Self::meta_set(&conn, "legacy_imported", &Utc::now().to_rfc3339())?;
+        }
         Ok(imported)
     }
 }
@@ -578,6 +618,45 @@ mod tests {
         assert!(!fingerprint_changed(&e, None));
         let unknown = entry("p2", ItemState::Complete);
         assert!(!fingerprint_changed(&unknown, Some("612.34")));
+    }
+
+    #[test]
+    fn a_transient_unavailable_does_not_demote_a_downloaded_release() {
+        let dir = temp_dir("demote");
+        let state = State::open(&dir.join(STATE_FILENAME)).unwrap();
+        let now = Utc::now();
+
+        let downloaded = StateEntry::downloaded(
+            "p1",
+            "Some Artist",
+            "Some Album",
+            Some("2024"),
+            "flac",
+            Some("612.34".to_string()),
+            Some(1_000),
+            false,
+            now,
+        );
+        state.upsert(&downloaded).unwrap();
+
+        // Bandcamp momentarily reports no item, or no downloads, for a release
+        // that has already been downloaded. Demoting it would erase the
+        // fingerprint, and since Skipped is never retried, change detection would
+        // be disabled permanently.
+        let unavailable = StateEntry::unavailable("p1", "UNKNOWN", false, now);
+        assert!(!state.record_unavailable(&unavailable).unwrap());
+
+        let read = state.get("p1").unwrap().unwrap();
+        assert_eq!(read.state, ItemState::Complete);
+        assert_eq!(read.size_mb.as_deref(), Some("612.34"));
+        assert!(read.downloaded_at.is_some());
+
+        // A never-downloaded release is still recorded as unavailable.
+        let fresh = StateEntry::unavailable("p2", "No downloads", false, now);
+        assert!(state.record_unavailable(&fresh).unwrap());
+        assert_eq!(state.get("p2").unwrap().unwrap().state, ItemState::Skipped);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -75,13 +75,19 @@ pub struct Args {
 
 /// Record that Bandcamp has no usable download for a purchase.
 ///
-/// These are deliberately not recorded as downloaded: a recheck sweep can
-/// revisit them, but no run retries them automatically, because retrying cannot
-/// succeed. Preorders are the exception - they become downloadable on release.
+/// These are not recorded as downloaded: a recheck sweep can revisit them, but
+/// no run retries them automatically because retrying cannot succeed.
+/// Preorders are the exception - they become downloadable on release.
+///
+/// The state store holds the rule against demoting a downloaded release.
 fn record_unavailable(state: &SharedState, id: &str, description: &str, is_preorder: bool) {
     let record = StateEntry::unavailable(id, description, is_preorder, Utc::now());
-    if let Err(e) = state.upsert(&record) {
-        warn!("failed to record state for {id}: {e}");
+    match state.record_unavailable(&record) {
+        Ok(true) => (),
+        Ok(false) => debug!(
+            "not recording {id} as unavailable: it is already recorded as downloaded"
+        ),
+        Err(e) => warn!("failed to record state for {id}: {e}"),
     }
 }
 
