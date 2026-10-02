@@ -199,7 +199,7 @@ retried at the next tick rather than stopping the container.
 
 Unraid's Docker manager passes environment variables and path mappings straight
 through, so no compose file is needed - set the variables above in the template.
-Two things are worth doing differently there:
+Some settings differ there:
 
 - **Keep the state database off the array**, with
   `BS_STATE=/config/state.db` on your appdata share. It is a SQLite database
@@ -207,6 +207,10 @@ Two things are worth doing differently there:
   array disks.
 - Set `PUID`/`PGID` to the owner of your media share rather than letting the
   container run as root.
+- One small file stays on the array: the run lock, `.bandsnatch.lock`, inside the
+  output folder. It has to be there, because it names the resource it protects -
+  moving it to appdata would let two containers sharing a library run at the same
+  time. A run that downloads anything is writing to the array anyway.
 
 ## Authentication
 
