@@ -25,13 +25,15 @@ and this project adheres to
   `INTERVAL`, `RUN_ONCE` and `JITTER`.
 - Add a run lock so a scheduled run and a manual re-download cannot race over
   the same library.
+- Publish the container image to GHCR. Pushes to `main` build amd64, version
+  tags build amd64 and arm64, and both tag the image for pulling on a NAS.
 
 ### Changed
 
 - Downloads are staged in a sibling directory and swapped into place, so a
-  re-download that fails part-way through no longer risks the existing copy.
-  Re-downloading a release now replaces its folder in place rather than leaving
-  a second ID-suffixed folder beside it.
+  re-download that fails part-way through leaves the existing copy untouched.
+  Re-downloading a release replaces its folder in place instead of leaving a
+  second ID-suffixed folder beside it.
 - `--force` ignores all recorded state rather than only the cache file.
 
 ### Fixed
@@ -43,6 +45,23 @@ and this project adheres to
 - Stop emitting a fake `(0000)` year for releases that Bandcamp reports no date
   for, which media servers read as year zero.
 - Fix a panic in `make_string_fs_safe` when it was passed an empty string.
+- Stop a release being demoted to skipped when Bandcamp transiently reports it
+  as unavailable. That overwrote the completed download, erasing the fingerprint
+  and dropping the release out of change detection permanently.
+- Report a failure to parse a release's download page instead of panicking on a
+  worker thread, which took the whole run down rather than skipping one release.
+- Give every release its own staging directory. With an `--album-path` template
+  that omits `{id}`, two releases sharing a folder could delete each other's
+  half-finished download, or damage one mid-swap.
+- Reject `--jobs 0`, which did nothing but still reported success, and
+  reject out-of-range `--recheck-after` values, which either made every release
+  due on every run or panicked.
+- List a re-download only after it succeeds, not when it is attempted.
+- Sanitise artist and album names in `--dry-run` output, as every other output
+  path already did.
+- Forward SIGTERM to the running sync in the container. Without it, `docker stop`
+  waited out its grace period and SIGKILLed the process, which could land between
+  the two renames of a directory swap and strand a release.
 
 ### Security
 
