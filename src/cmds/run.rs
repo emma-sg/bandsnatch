@@ -12,6 +12,7 @@ use clap::{builder::PossibleValuesParser, Args as ClapArgs};
 use crossbeam_utils::thread;
 use indicatif::MultiProgress;
 use std::{
+    collections::VecDeque,
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -272,7 +273,9 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let queue = util::WorkQueue::from_vec(items);
+    // A plain queue. Popping is a short critical section and the download that
+    // follows deliberately happens without holding the lock.
+    let queue = Arc::new(Mutex::new(VecDeque::from(items)));
     let m = Arc::new(MultiProgress::new());
     let dry_run_results = Arc::new(Mutex::new(Vec::<String>::new()));
     let updated = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -290,12 +293,22 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
             // somehow re-create thread if it panics
             scope.spawn(move |_| {
-                while let Some(Work {
-                    id,
-                    download,
-                    action,
-                }) = queue.get_work()
-                {
+                loop {
+                    let next = match queue.lock() {
+                        Ok(mut queue) => queue.pop_front(),
+                        // A panicked worker poisoned the queue. Treat it as
+                        // empty so the remaining workers finish.
+                        Err(_) => None,
+                    };
+                    let Some(Work {
+                        id,
+                        download,
+                        action,
+                    }) = next
+                    else {
+                        break;
+                    };
+
                     m.suspend(|| debug!("thread {i} taking {id}"));
 
                     let item = match api.get_digital_item(&download.url, &debug) {

@@ -160,6 +160,28 @@ impl Api {
             .collect()
     }
 
+    /// The raw `data-blob` JSON from a fan's collection page.
+    ///
+    /// Shared by collection scraping and `debug-collection`, so a Bandcamp
+    /// markup change is fixed in one place, and so the debug command uses the
+    /// same rate-limited request path as everything else.
+    ///
+    /// A missing element is an error, not a panic: markup changes are routine.
+    pub fn collection_pagedata(&self, path: &str) -> Result<String, Box<dyn Error>> {
+        let url = Self::bc_path(path);
+        let body = self.request(Method::GET, &url)?.text()?;
+        let soup = Soup::new(&body);
+
+        let data_el = soup.attr("id", "pagedata").find().ok_or_else(|| {
+            format!("failed to find the `pagedata` element at {url}; Bandcamp may have changed its markup")
+        })?;
+        let data_blob = data_el.get("data-blob").ok_or_else(|| {
+            format!("failed to extract `data-blob` from the `pagedata` element at {url}")
+        })?;
+
+        Ok(data_blob)
+    }
+
     /// Scrape a user's Bandcamp page to find download urls
     pub fn get_download_urls(
         &self,
@@ -169,18 +191,9 @@ impl Api {
     ) -> Result<BandcampPage, Box<dyn Error>> {
         debug!("`get_download_urls` for Bandcamp page '{name}'");
 
-        let body = self.request(Method::GET, &Self::bc_path(name))?.text()?;
-        let soup = Soup::new(&body);
-
-        let data_el = soup
-            .attr("id", "pagedata")
-            .find()
-            .expect("Failed to extract data from collection page.");
-        let data_blob = data_el
-            .get("data-blob")
-            .expect("Failed to extract data from element on collection page.");
+        let data_blob = self.collection_pagedata(name)?;
         let mut fanpage_data: ParsedFanpageData = serde_json::from_str(&data_blob)
-            .expect("Failed to deserialise collection page data blob.");
+            .map_err(|e| format!("failed to deserialise the collection page data blob: {e}"))?;
         debug!("Successfully fetched Bandcamp page, and found + deserialised data blob");
 
         let items = fanpage_data
@@ -191,9 +204,11 @@ impl Api {
 
         match fanpage_data.fan_data.is_own_page {
             Some(true) => (),
-            _ => bail!(format!(
-                r#"Failed to scrape collection data for "{name}" (`is_own_page` is false). Perhaps check your cookies, or your spelling."#
-            )),
+            _ => {
+                bail!(format!(
+                    r#"Failed to scrape collection data for "{name}" (`is_own_page` is false). Perhaps check your cookies, or your spelling."#
+                ));
+            }
         }
 
         // TODO: make sure this exists
@@ -263,7 +278,7 @@ impl Api {
         let collection_data = match collection_name {
             "collection_items" => &data.collection_data,
             "hidden_items" => &data.hidden_data,
-            x => bail!(format!(r#"unexpected value for `collection_name`: "{x}""#)),
+            x => return Err(format!(r#"unexpected value for `collection_name`: "{x}""#).into()),
         };
 
         let mut last_token = collection_data.last_token.clone().unwrap();
@@ -332,7 +347,7 @@ impl Api {
                 println!("Run with `--debug` to see the full JSON blob.\n")
             }
 
-            bail!(format!("failed parsing {url}"))
+            bail!(format!("failed parsing {url}"));
         }
 
         let item = item_result.unwrap().digital_items.first().cloned();

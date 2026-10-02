@@ -1,7 +1,6 @@
 use crate::cookies;
 use clap::Args as ClapArgs;
 use serde_json::json;
-use soup::prelude::*;
 use std::fs::File;
 use std::io::Write;
 
@@ -43,22 +42,11 @@ pub fn command(
     let cookies = cookies::get_bandcamp_cookies(cookies_file.as_deref())?;
     let api = crate::api::Api::new(cookies);
 
-    let body = api
-        .client
-        .get(&format!("https://bandcamp.com/{user}"))
-        .send()?
-        .text()?;
-    let soup = Soup::new(&body);
-
-    let data_el = soup
-        .attr("id", "pagedata")
-        .find()
-        .expect("Failed to find `pagedata` element on your collection page.");
-    let data_blob = data_el
-        .get("data-blob")
-        .expect("Failed to extract data from element on collection page.");
-
-    let mut jason: serde_json::value::Value = serde_json::from_str(&data_blob).unwrap();
+    // Shares the scrape with collection runs, so this command also goes through
+    // the rate-limited request path instead of hitting Bandcamp directly.
+    let data_blob = api.collection_pagedata(&user)?;
+    let mut jason: serde_json::value::Value = serde_json::from_str(&data_blob)
+        .map_err(|e| format!("failed to parse the collection page data blob: {e}"))?;
     // Clear out info that we dont want shared
     jason["collection_data"]["redownload_urls"] = json!("[redacted by bandsnatch]");
     jason["collection_data"]["sequence"] = json!("[redacted by bandsnatch]");
