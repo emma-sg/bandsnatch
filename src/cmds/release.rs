@@ -135,7 +135,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
     let m = MultiProgress::new();
     let content_length = context
         .api
-        .download_item(&item, &path, &audio_format, &m)?;
+        .download_item(&item, &path, &id, &audio_format, &m)?;
 
     let record = StateEntry::downloaded(
         &id,

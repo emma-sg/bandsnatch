@@ -297,7 +297,8 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                    let content_length = match api.download_item(&item, &path, &audio_format, &m) {
+                    let content_length = match api.download_item(&item, &path, &id, &audio_format, &m)
+                    {
                         Ok(len) => len,
                         Err(e) => {
                             // A failed download is deliberately not recorded, so

@@ -2,7 +2,7 @@ use phf::phf_map;
 use std::{
     fs,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 // From https://github.com/Ezwen/bandcamp-collection-downloader/blob/master/src/main/kotlin/bandcampcollectiondownloader/core/Constants.kt#L7
@@ -96,18 +96,13 @@ where
 /// Atomically replace `target` with the fully prepared `staging` directory.
 ///
 /// The two must share a parent so the rename stays within one filesystem. If the
-/// swap fails, any pre-existing `target` is put back: a failed re-download must
-/// never leave the library missing a release it previously had.
-pub fn replace_directory(target: &Path, staging: &Path) -> io::Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::other("target path has no parent directory"))?;
-    let name = target
-        .file_name()
-        .ok_or_else(|| io::Error::other("target path has no final component"))?
-        .to_string_lossy();
-
-    let previous = parent.join(format!(".{name}.bandsnatch-previous"));
+/// swap fails, any pre-existing `target` is put back, so a failed re-download
+/// cannot leave the library missing a release it already had.
+///
+/// `token` must be the one the caller staged `staging` under, so two concurrent
+/// swaps of the same target cannot remove the copy the other swap moved aside.
+pub fn replace_directory(target: &Path, staging: &Path, token: &str) -> io::Result<()> {
+    let previous = previous_dir(target, token)?;
     if previous.exists() {
         fs::remove_dir_all(&previous)?;
     }
@@ -129,6 +124,42 @@ pub fn replace_directory(target: &Path, staging: &Path) -> io::Result<()> {
         fs::remove_dir_all(&previous)?;
     }
     Ok(())
+}
+
+/// The hidden sibling directory a download is unpacked into before being swapped
+/// into place.
+///
+/// `token` - normally the release id - makes the name unique per release. Two
+/// purchases can resolve to one output path when `--album-path` omits `{id}`,
+/// and a shared staging name would let one worker delete another's half-written
+/// download mid-transfer.
+pub fn staging_dir(target: &Path, token: &str) -> io::Result<PathBuf> {
+    hidden_sibling(target, token, "staging")
+}
+
+/// The hidden sibling directory the old copy is moved into while the new
+/// download is put in place.
+pub fn previous_dir(target: &Path, token: &str) -> io::Result<PathBuf> {
+    hidden_sibling(target, token, "previous")
+}
+
+/// Built in one place so the staging and previous names always match.
+///
+/// The token is made filesystem-safe, so a caller cannot put a path separator
+/// in it and escape the album's parent directory.
+fn hidden_sibling(target: &Path, token: &str, suffix: &str) -> io::Result<PathBuf> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("target path has no parent directory"))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::other("target path has no final component"))?
+        .to_string_lossy();
+
+    Ok(parent.join(format!(
+        ".{name}.{}.bandsnatch-{suffix}",
+        make_string_fs_safe(token)
+    )))
 }
 
 #[cfg(test)]
@@ -189,19 +220,19 @@ mod tests {
     fn replace_directory_swaps_in_new_content_and_leaves_no_debris() {
         let root = temp_dir("swap");
         let target = root.join("Album");
-        let staging = root.join(".Album.bandsnatch-staging");
+        let staging = staging_dir(&target, "p1").unwrap();
 
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("old.flac"), b"old").unwrap();
         fs::create_dir_all(&staging).unwrap();
         fs::write(staging.join("new.flac"), b"new").unwrap();
 
-        replace_directory(&target, &staging).unwrap();
+        replace_directory(&target, &staging, "p1").unwrap();
 
         assert_eq!(fs::read(target.join("new.flac")).unwrap(), b"new");
         assert!(!target.join("old.flac").exists());
         assert!(!staging.exists());
-        assert!(!root.join(".Album.bandsnatch-previous").exists());
+        assert!(!previous_dir(&target, "p1").unwrap().exists());
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -210,11 +241,11 @@ mod tests {
     fn replace_directory_creates_the_target_when_there_was_nothing_before() {
         let root = temp_dir("fresh");
         let target = root.join("Album");
-        let staging = root.join(".Album.bandsnatch-staging");
+        let staging = staging_dir(&target, "p1").unwrap();
         fs::create_dir_all(&staging).unwrap();
         fs::write(staging.join("new.flac"), b"new").unwrap();
 
-        replace_directory(&target, &staging).unwrap();
+        replace_directory(&target, &staging, "p1").unwrap();
 
         assert_eq!(fs::read(target.join("new.flac")).unwrap(), b"new");
         assert!(!staging.exists());
@@ -224,21 +255,48 @@ mod tests {
 
     #[test]
     fn a_failed_swap_leaves_the_existing_release_intact() {
-        // This is the entire reason downloads are staged: a re-download that
-        // fails must not cost the user the copy they already had.
+        // Downloads are staged so that a re-download that fails does not cost
+        // the user the copy they already had.
         let root = temp_dir("failed");
         let target = root.join("Album");
-        let staging = root.join(".Album.bandsnatch-staging");
+        let staging = staging_dir(&target, "p1").unwrap();
 
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("old.flac"), b"old").unwrap();
-        // Deliberately do not create `staging`, so the final rename fails.
+        // `staging` is not created, so the final rename fails.
 
-        assert!(replace_directory(&target, &staging).is_err());
+        assert!(replace_directory(&target, &staging, "p1").is_err());
 
         assert_eq!(fs::read(target.join("old.flac")).unwrap(), b"old");
-        assert!(!root.join(".Album.bandsnatch-previous").exists());
+        assert!(!previous_dir(&target, "p1").unwrap().exists());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn staging_names_are_unique_per_release_and_cannot_escape_the_parent() {
+        // Two releases resolve to one output path when `--album-path` omits
+        // `{id}`. A shared staging directory would let one worker delete
+        // another's half-written download, and a shared previous directory would
+        // destroy a release mid-swap.
+        let target = PathBuf::from("/music/Some Artist/Some Album");
+        assert_ne!(
+            staging_dir(&target, "p1").unwrap(),
+            staging_dir(&target, "p2").unwrap()
+        );
+        assert_ne!(
+            previous_dir(&target, "p1").unwrap(),
+            previous_dir(&target, "p2").unwrap()
+        );
+        assert_ne!(
+            staging_dir(&target, "p1").unwrap(),
+            previous_dir(&target, "p1").unwrap()
+        );
+
+        // The token is caller-supplied, so it must not be able to walk out of
+        // the album's parent directory.
+        let escaped = staging_dir(&target, "../../evil").unwrap();
+        assert_eq!(escaped.parent().unwrap(), target.parent().unwrap());
+        assert_eq!(escaped.components().count(), 4);
     }
 }

@@ -389,16 +389,16 @@ impl Api {
     /// swapped into place, so a failure part-way through never disturbs an
     /// existing `path`. On failure the staging directory is removed; if that
     /// removal itself fails, a hidden `.bandsnatch-staging` or
-    /// `.bandsnatch-previous` directory can be left beside `path`. Both are
-    /// harmless, and the next successful download of the same release clears
-    /// them.
+    /// `.bandsnatch-previous` directory can be left beside `path`. The next
+    /// successful download of the same release clears them.
     ///
-    /// Returns an error rather than panicking when the release offers no
-    /// download for `audio_format`: a panic in a worker thread aborts the run.
+    /// A release with no download for `audio_format` is an error, not a panic: a
+    /// panic in a worker thread aborts the run.
     pub fn download_item(
         &self,
         item: &DigitalItem,
         path: &Path,
+        token: &str,
         audio_format: &str,
         m: &indicatif::MultiProgress,
     ) -> Result<u64, Box<dyn Error>> {
@@ -470,23 +470,17 @@ impl Api {
         let parent = target
             .parent()
             .ok_or_else(|| format!("output path `{}` has no parent directory", path.display()))?;
-        let name = target
-            .file_name()
-            .ok_or_else(|| format!("output path `{}` has no final component", path.display()))?
-            .to_string_lossy()
-            .into_owned();
 
         m.suspend(|| debug!("Downloading as `{filename}` for `{}`", path.display()));
 
-        // Download and unpack into a sibling staging directory, then swap it
-        // into place. A first download has nothing to lose, but re-downloading
-        // an updated release must not destroy the existing copy if the transfer
-        // or the unzip fails part-way through.
+        // Download and unpack into a sibling staging directory, then swap it into
+        // place: re-downloading an updated release must not destroy the existing
+        // copy if the transfer or the unzip fails part-way through.
         //
-        // Staging is a sibling of the target rather than a system temp path so
-        // that the final rename stays within one filesystem.
+        // Staging is a sibling of the target, not a system temp path, so the
+        // final rename stays within one filesystem.
         fs::create_dir_all(parent)?;
-        let staging = parent.join(format!(".{name}.bandsnatch-staging"));
+        let staging = util::staging_dir(target, token)?;
         if staging.exists() {
             fs::remove_dir_all(&staging)?;
         }
@@ -503,8 +497,8 @@ impl Api {
 
         pb.set_position(len);
 
-        if let Err(err) = util::replace_directory(target, &staging) {
-            // Leave no staging debris behind. The existing release is intact.
+        if let Err(err) = util::replace_directory(target, &staging, token) {
+            // Leave no staging debris behind; the existing release is intact.
             let _ = fs::remove_dir_all(&staging);
             pb.finish_and_clear();
             return Err(err.into());
