@@ -98,14 +98,18 @@ so a release Bandcamp reports no date for becomes `Album [p1234]` rather than
 `Album () [p1234]`. Path separators inside a title are replaced, so a title
 cannot create extra directories or escape the output folder.
 
-Re-downloading a release replaces its folder in place, and only after the new
-copy has been transferred and unpacked successfully. A download that fails
-part-way through leaves the folder you already had untouched.
+A template that produces no folder below the output folder at all - for example
+`{artist}` for a release with an empty artist - is refused: naming the output
+folder itself would be destructive.
+
+Re-downloading a release replaces its folder in place, once the new copy has
+been transferred and unpacked successfully. A download that fails part-way
+through leaves the folder you already had untouched.
 
 Changing `--album-path` neither moves existing folders nor re-downloads
-anything, because state is keyed by release ID and nothing inspects the
-filesystem. New downloads land in the new layout while old folders keep their
-old names, so use `--force` if you want a library rewritten consistently.
+anything: state is keyed by release ID, not by path. New downloads land in the
+new layout while old folders keep their old names, so use `--force` if you want
+a library rewritten consistently.
 
 If an earlier run merged same-named releases into one folder, use
 `--force --album "<title>"` and `--artist "<artist>"` with your usual arguments
@@ -115,9 +119,8 @@ to download them again; the `{id}` in the default layout keeps them separate.
 
 Bandcamp does not change a purchase ID when an artist replaces a release's
 audio, and a pre-order turns into a full download without the purchase changing
-either. For each release, Bandsnatch therefore records the archive size Bandcamp
-advertises for the format you downloaded, alongside the exact number of bytes it
-transferred.
+either. For each release, Bandsnatch records the archive size Bandcamp advertises
+for the format you downloaded, alongside the number of bytes it transferred.
 
 - **Pre-orders are re-checked automatically.** A release downloaded while
   Bandcamp still reported it as a pre-order is retried on every run until
@@ -129,9 +132,9 @@ transferred.
 - **`--recheck-all`** does the same for every release in one pass.
 - **`--force`** re-downloads everything unconditionally, without comparing.
 
-A re-check needs the release's download page in order to read the advertised
-size, so one request per due release is unavoidable: the URLs Bandcamp hands out
-are signed and rotate, so there is no cheaper stable signal to compare.
+A re-check needs the release's download page to read the advertised size, so one
+request per due release is unavoidable: the URLs Bandcamp hands out are signed
+and rotate, so there is no cheaper stable signal to compare.
 
 ## Re-downloading a single release
 
@@ -140,12 +143,12 @@ bandsnatch release p1234 -c ./cookies.json -f flac -o ./Music --user you
 bandsnatch release 'https://bandcamp.com/download/...' -c ./cookies.json -o ./Music
 ```
 
-`release` ignores the state cache for that one release, which is what you want
-after an artist re-uploads a track or a pre-order finally ships. The target is
-either a collection sale-item key - the value inside the `[p1234]` suffix of each
-folder, so it is already visible in your library - or a full download page URL.
-A key needs `--user`, because keys can only be found by reading your collection
-listing; a URL does not.
+`release` ignores the recorded state for that one release: use it after an artist
+re-uploads a track, or when a pre-order ships. The target is either a collection
+sale-item key - the value inside the `[p1234]` suffix of each folder, so it is
+already visible in your library - or a full download page URL. A key needs
+`--user`, because keys can only be found by reading your collection listing; a
+URL does not.
 
 It honours the same `--album-path` and the same state database as `run`, so the
 release is recorded afterwards and no later run fetches it again.

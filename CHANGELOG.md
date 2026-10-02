@@ -44,6 +44,22 @@ and this project adheres to
   for, which media servers read as year zero.
 - Fix a panic in `make_string_fs_safe` when it was passed an empty string.
 
+### Security
+
+- Reduce the `Content-Disposition` download filename to a single safe path
+  component. The value comes from the remote server, and both `Path::join` with
+  an absolute argument and `..` components could previously make a download
+  write - and, for albums, delete - a file anywhere the process could reach. A
+  missing or unusable filename is now an error rather than a panic.
+- Refuse an `--album-path` template that does not produce a folder strictly
+  below the output folder. A template whose placeholders all rendered empty (for
+  example `{artist}/{album} ({year})` for a release with an empty artist and
+  album) made the output folder itself the download target, which the atomic
+  swap then renamed aside and deleted recursively, destroying the library.
+- Key the run lock to the output folder instead of the state database path, so
+  two runs sharing a library but resolving different `--state` values are still
+  mutually exclusive.
+
 ## [0.3.3] - 2024-09-07
 
 ### Fixed
