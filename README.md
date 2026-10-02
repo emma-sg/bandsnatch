@@ -43,15 +43,22 @@ Arguments:
   <USER>  Name of the user to download releases from (must be logged in through cookies) [env: BS_USER=]
 
 Options:
+      --album <ALBUM>           [env: BS_ALBUM=]
+      --artist <ARTIST>         [env: BS_ARTIST=]
   -f, --format <AUDIO_FORMAT>   The audio format to download the files in [env: BS_FORMAT=] [possible values: flac, wav, aac-hi, mp3-320, aiff-lossless, vorbis, mp3-v0, alac]
   -c, --cookies <COOKIES_FILE>  [env: BS_COOKIES=]
       --debug                   Enables some extra debug output in certain scenarios [env: BS_DEBUG=]
   -d, --dry-run                 Return a list of all tracks to be downloaded, without actually downloading them
-  -F, --force                   Ignores any found cache file and instead does a from-scratch download run [env: BS_FORCE=]
+  -F, --force                   Ignores all recorded state and downloads every release again [env: BS_FORCE=]
+      --recheck-after <DAYS>    Re-check an already-downloaded release for an in-place update once this many days have passed since it was last checked [env: BS_RECHECK_AFTER=]
+      --recheck-all             Re-check every downloaded release during this run, downloading only the ones whose advertised size changed. Cheaper than `--force`, which re-downloads unconditionally [env: BS_RECHECK_ALL=]
   -j, --jobs <JOBS>             The amount of parallel jobs (threads) to use [env: BS_JOBS=] [default: 4]
-  -n, --limit <LIMIT>           Maximum number of releases to download. Useful for testing [env: BS_LIMIT=]
+  -n, --limit <LIMIT>           Maximum number of releases to process. Useful for testing [env: BS_LIMIT=]
+      --no-wait                 Fail immediately instead of waiting when another run holds the lock [env: BS_NO_WAIT=]
   -o, --output-folder <FOLDER>  The folder to extract downloaded releases to [env: BS_OUTPUT_FOLDER=] [default: ./]
-  -h, --help                    Print help information
+      --album-path <TEMPLATE>   Folder layout for each release, relative to the output folder [env: BS_ALBUM_PATH=] [default: "{artist}/{album} ({year}) [{id}]"]
+      --state <PATH>            Path to the state database. Defaults to `.bandsnatch-state.db` inside the output folder [env: BS_STATE=]
+  -h, --help                    Print help (see more with '--help')
 ```
 
 Besides these options, you can also use environment variables with the option
@@ -66,9 +73,12 @@ bandsnatch run -c ./cookies.json -f flac -o ./Music ovyerus
 ```
 
 This would download my entire music collection into a local "Music" folder, and
-also create a `bandcamp-collection-downloader.cache` in the same directory,
-which then gets read on future runs in order to skip items it has already
-retrieved.
+also create a `.bandsnatch-state.db` SQLite database recording what was
+retrieved; later runs read it to skip releases that are already downloaded.
+
+If a `.cache` file from an earlier version - or from Ezwen's tool, which uses the
+same filename - is present, it is imported into the database once and the old
+file is left untouched.
 
 ### Output folders
 
@@ -76,14 +86,124 @@ Downloads are stored under `<output>/<artist>/<title> (<year>) [<collection-id>]
 The collection ID keeps releases with the same artist, title, and year in
 separate folders, including when downloads run concurrently.
 
-Existing folders from older versions are not renamed or deleted. Cached
-downloads remain skipped; if you use `--force`, the new download goes into an
-ID-suffixed folder instead of overwriting the old one. Check the new download
-before removing or moving any old folder.
+The layout is configurable with `--album-path`, which accepts `{artist}`,
+`{album}`, `{year}` and `{id}`:
 
-If an earlier run merged same-named releases, use `--force --album "<title>"`
-and `--artist "<artist>"` with your usual arguments to re-download them into
-separate folders.
+```
+bandsnatch run -f flac -o ./Music --album-path '{artist}/{album} ({year})' you
+```
+
+A placeholder with no value is dropped along with any brackets it leaves empty,
+so a release Bandcamp reports no date for becomes `Album [p1234]` rather than
+`Album () [p1234]`. Path separators inside a title are replaced, so a title
+cannot create extra directories or escape the output folder.
+
+Re-downloading a release replaces its folder in place, and only after the new
+copy has been transferred and unpacked successfully. A download that fails
+part-way through leaves the folder you already had untouched.
+
+Changing `--album-path` neither moves existing folders nor re-downloads
+anything, because state is keyed by release ID and nothing inspects the
+filesystem. New downloads land in the new layout while old folders keep their
+old names, so use `--force` if you want a library rewritten consistently.
+
+If an earlier run merged same-named releases into one folder, use
+`--force --album "<title>"` and `--artist "<artist>"` with your usual arguments
+to download them again; the `{id}` in the default layout keeps them separate.
+
+## Keeping releases up to date
+
+Bandcamp does not change a purchase ID when an artist replaces a release's
+audio, and a pre-order turns into a full download without the purchase changing
+either. For each release, Bandsnatch therefore records the archive size Bandcamp
+advertises for the format you downloaded, alongside the exact number of bytes it
+transferred.
+
+- **Pre-orders are re-checked automatically.** A release downloaded while
+  Bandcamp still reported it as a pre-order is retried on every run until
+  Bandcamp stops saying pre-order, at which point the full release is fetched.
+- **`--recheck-after DAYS`** re-checks a release once that many days have passed
+  since it was last checked, and re-downloads only those whose advertised size
+  changed. This costs one request per due release, and no transfer for releases
+  that have not changed.
+- **`--recheck-all`** does the same for every release in one pass.
+- **`--force`** re-downloads everything unconditionally, without comparing.
+
+A re-check needs the release's download page in order to read the advertised
+size, so one request per due release is unavoidable: the URLs Bandcamp hands out
+are signed and rotate, so there is no cheaper stable signal to compare.
+
+## Re-downloading a single release
+
+```
+bandsnatch release p1234 -c ./cookies.json -f flac -o ./Music --user you
+bandsnatch release 'https://bandcamp.com/download/...' -c ./cookies.json -o ./Music
+```
+
+`release` ignores the state cache for that one release, which is what you want
+after an artist re-uploads a track or a pre-order finally ships. The target is
+either a collection sale-item key - the value inside the `[p1234]` suffix of each
+folder, so it is already visible in your library - or a full download page URL.
+A key needs `--user`, because keys can only be found by reading your collection
+listing; a URL does not.
+
+It honours the same `--album-path` and the same state database as `run`, so the
+release is recorded afterwards and no later run fetches it again.
+
+## Docker
+
+A multi-stage [Dockerfile](./Dockerfile) builds a static musl binary and runs it
+under a small supervisor, so the schedule does not have to live on the host.
+
+```
+docker run -d \
+  --name bandsnatch \
+  --restart unless-stopped \
+  -e PUID=1000 -e PGID=1000 \
+  -e BS_USER=your-bandcamp-username \
+  -e BS_COOKIES=/config/cookies.txt \
+  -e BS_FORMAT=flac \
+  -e BS_OUTPUT_FOLDER=/music \
+  -e BS_STATE=/config/state.db \
+  -e RUN_AT=3 \
+  -v /path/to/appdata/bandsnatch:/config \
+  -v /path/to/music:/music \
+  bandsnatch:local
+```
+
+The container only supervises the same one-shot CLI, which is what makes one-off
+runs and on-demand re-downloads work without a second entry point:
+
+```
+docker run --rm bandsnatch:local run --dry-run -f flac -o /music you
+docker exec bandsnatch release p1234
+```
+
+| Variable | Purpose |
+| --- | --- |
+| `RUN_ONCE` | `1` runs once and exits, for cron or a Kubernetes `CronJob` (the default is to keep scheduling). |
+| `RUN_AT` | Local hour (0-23) to run at, daily. |
+| `INTERVAL` | Seconds between runs, used when `RUN_AT` is unset. Defaults to `86400`. |
+| `JITTER` | Extra random seconds added to the delay, so many containers do not all hit Bandcamp on the hour. |
+| `PUID` / `PGID` | Run downloads as these ids, matching the owner of your media share. |
+| `CHOWN_RECURSIVE` | `1` takes ownership of every file in the output folder. Off by default because it is slow on a large library. |
+| `EXTRA_ARGS` | Extra CLI flags, for anything that has no `BS_` environment variable, e.g. `--recheck-after 7`. |
+
+Every `BS_*` variable maps to the CLI flag of the same name. A failed run is
+retried at the next tick rather than stopping the container.
+
+### Unraid
+
+Unraid's Docker manager passes environment variables and path mappings straight
+through, so no compose file is needed - set the variables above in the template.
+Two things are worth doing differently there:
+
+- **Keep the state database off the array**, with
+  `BS_STATE=/config/state.db` on your appdata share. It is a SQLite database
+  written on every run, and keeping it on cache storage avoids waking spun-down
+  array disks.
+- Set `PUID`/`PGID` to the owner of your media share rather than letting the
+  container run as root.
 
 ## Authentication
 

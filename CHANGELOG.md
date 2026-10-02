@@ -11,6 +11,28 @@ and this project adheres to
 ### Added
 
 - Add `--filter` flag to filter downloads by purchase date.
+- Track per-release state in a SQLite database instead of the plain-text cache.
+  An existing `bandcamp-collection-downloader.cache` is imported on first run.
+- Detect releases whose audio was replaced after purchase: the advertised
+  archive size and the transferred byte count are recorded, and
+  `--recheck-after` / `--recheck-all` re-download only what changed.
+- Add the `release` subcommand, which re-downloads a single release by
+  sale-item key or download URL, bypassing the state cache.
+- Add `--album-path` to configure the output folder layout. For example,
+  `--album-path '{artist}/{album} ({year})'` drops the release ID for media
+  servers that do not need it for matching.
+- Add a Dockerfile and scheduled entrypoint, with `PUID`/`PGID`, `RUN_AT`,
+  `INTERVAL`, `RUN_ONCE` and `JITTER`.
+- Add a run lock so a scheduled run and a manual re-download cannot race over
+  the same library.
+
+### Changed
+
+- Downloads are staged in a sibling directory and swapped into place, so a
+  re-download that fails part-way through no longer risks the existing copy.
+  Re-downloading a release now replaces its folder in place rather than leaving
+  a second ID-suffixed folder beside it.
+- `--force` ignores all recorded state rather than only the cache file.
 
 ### Fixed
 
@@ -18,6 +40,9 @@ and this project adheres to
 - Redownload cached preorders when Bandcamp marks them as released (#29).
 - Add release IDs to download folder names to avoid duplicately-named releases
   conflicting (#23).
+- Stop emitting a fake `(0000)` year for releases that Bandcamp reports no date
+  for, which media servers read as year zero.
+- Fix a panic in `make_string_fs_safe` when it was passed an empty string.
 
 ## [0.3.3] - 2024-09-07
 
