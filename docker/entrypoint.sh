@@ -80,15 +80,30 @@ prepare_dirs() {
 : "${RUN_AT:=}"
 : "${JITTER:=}"
 
-# `sleep` is a child process, so a bare `sleep` would leave PID 1 exiting on
-# SIGTERM while the sleep still runs. Backgrounding + `wait` makes the signal
-# interrupt the wait and lets the trap run.
+# `sleep` is a child, so a bare `sleep` would leave PID 1 exiting on SIGTERM
+# while the sleep kept running. Backgrounding it and `wait`ing lets the signal
+# interrupt the wait and run the trap.
+#
+# The sync runs backgrounded for the same reason: a shell defers traps while a
+# foreground child runs, so `docker stop` would never reach bandsnatch. It would
+# run until Docker's grace period expires and SIGKILL kills it - possibly
+# between the two renames of a directory swap, stranding a release. `exec` in
+# `run_sync` makes `$run_pid` the bandsnatch process (or the su-exec that
+# becomes it), so the forwarded signal arrives.
 shutdown=0
-trap 'shutdown=1' TERM INT
+run_pid=
+trap 'shutdown=1; if [ -n "$run_pid" ]; then kill -TERM "$run_pid" 2>/dev/null || true; fi' TERM INT
 
 interruptible_sleep() {
     sleep "$1" &
     wait $! || true
+}
+
+run_sync() {
+    if [ -n "$PUID" ] || [ -n "$PGID" ]; then
+        exec su-exec "${PUID:-0}:${PGID:-0}" "$BIN" run ${EXTRA_ARGS:-}
+    fi
+    exec "$BIN" run ${EXTRA_ARGS:-}
 }
 
 # Seconds until the next occurrence of local-time hour RUN_AT, plus optional
@@ -128,12 +143,21 @@ prepare_dirs
 while :; do
     log "run starting: $(drop_privs "$BIN" --version 2>/dev/null || echo bandsnatch) against ${BS_OUTPUT_FOLDER:-/music}"
 
-    # BS_* environment variables are read by clap directly; EXTRA_ARGS exists
-    # for flags that have no env binding. Word splitting here is intentional.
-    if drop_privs "$BIN" run ${EXTRA_ARGS:-}; then
+    # BS_* variables are read by clap directly; EXTRA_ARGS carries flags with no
+    # env binding, so it is word-split.
+    run_sync &
+    run_pid=$!
+    status=0
+    wait "$run_pid" || status=$?
+    run_pid=
+
+    if [ "$shutdown" = "1" ]; then
+        log "interrupted during a run (status $status)"
+        break
+    fi
+    if [ "$status" = "0" ]; then
         log "run finished cleanly"
     else
-        status=$?
         # A failed sync must not kill the container; the next tick retries.
         log "run failed with exit status $status"
     fi
