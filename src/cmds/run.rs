@@ -1,9 +1,6 @@
 use crate::{
     api,
-    cmds::AUDIO_FORMATS,
-    cookies,
-    library::AlbumPath,
-    lock,
+    cmds::{CommonArgs, AUDIO_FORMATS},
     state::{self, Action, RecheckPolicy, State, StateEntry},
     util,
 };
@@ -13,16 +10,15 @@ use crossbeam_utils::thread;
 use indicatif::MultiProgress;
 use std::{
     collections::VecDeque,
-    fs, io,
-    path::{Path, PathBuf},
+    io,
     sync::{Arc, Mutex},
 };
 
-/// Shared handle to the state database. `rusqlite::Connection` is `Send` but not
-/// `Sync`, so worker threads serialise their (microsecond) writes through this.
-type SharedState = Arc<Mutex<State>>;
+/// Shared handle to the state store. `State` serialises access internally, so
+/// callers only need this `Arc`.
+type SharedState = Arc<State>;
 
-/// A release to act on this run.
+/// A release this run will act on.
 #[derive(Clone, Debug)]
 struct Work {
     id: String,
@@ -32,6 +28,9 @@ struct Work {
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    #[command(flatten)]
+    common: CommonArgs,
+
     #[arg(long, env = "BS_ALBUM")]
     album: Option<String>,
 
@@ -41,17 +40,6 @@ pub struct Args {
     /// The audio format to download the files in.
     #[arg(short = 'f', long = "format", value_parser = PossibleValuesParser::new(AUDIO_FORMATS), env = "BS_FORMAT")]
     audio_format: String,
-
-    #[arg(short, long, value_name = "COOKIES_FILE", env = "BS_COOKIES")]
-    cookies: Option<String>,
-
-    /// Enables some extra debug output in certain scenarios.
-    #[arg(long, env = "BS_DEBUG")]
-    debug: bool,
-
-    /// Return a list of all tracks to be downloaded, without actually downloading them.
-    #[arg(short = 'd', long = "dry-run")]
-    dry_run: bool,
 
     /// Ignores all recorded state and downloads every release again.
     #[arg(short = 'F', long, env = "BS_FORCE")]
@@ -80,38 +68,6 @@ pub struct Args {
     #[arg(short = 'n', long, env = "BS_LIMIT")]
     limit: Option<usize>,
 
-    /// Fail immediately instead of waiting when another run holds the lock.
-    #[arg(long, env = "BS_NO_WAIT")]
-    no_wait: bool,
-
-    /// The folder to extract downloaded releases to.
-    #[arg(
-        short,
-        long = "output-folder",
-        value_name = "FOLDER",
-        default_value = "./",
-        env = "BS_OUTPUT_FOLDER"
-    )]
-    output_folder: String,
-
-    /// Folder layout for each release, relative to the output folder.
-    ///
-    /// Placeholders: {artist}, {album}, {year}, {id}. A placeholder with no
-    /// value is omitted along with any brackets it leaves empty, so a release
-    /// with no reported date is not named `Album ()`.
-    #[arg(
-        long,
-        value_name = "TEMPLATE",
-        default_value = crate::library::DEFAULT_ALBUM_PATH,
-        env = "BS_ALBUM_PATH"
-    )]
-    album_path: String,
-
-    /// Path to the state database. Defaults to `.bandsnatch-state.db` inside the
-    /// output folder.
-    #[arg(long, value_name = "PATH", env = "BS_STATE")]
-    state: Option<String>,
-
     /// Name of the user to download releases from (must be logged in through cookies).
     #[arg(env = "BS_USER")]
     user: String,
@@ -124,106 +80,45 @@ pub struct Args {
 /// succeed. Preorders are the exception - they become downloadable on release.
 fn record_unavailable(state: &SharedState, id: &str, description: &str, is_preorder: bool) {
     let record = StateEntry::unavailable(id, description, is_preorder, Utc::now());
-    match state.lock() {
-        Ok(guard) => {
-            if let Err(e) = guard.upsert(&record) {
-                warn!("failed to record state for {id}: {e}");
-            }
-        }
-        Err(_) => warn!("state lock poisoned, not recording {id}"),
+    if let Err(e) = state.upsert(&record) {
+        warn!("failed to record state for {id}: {e}");
     }
 }
 
 pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let Args {
+        common,
         album,
         artist,
         audio_format,
-        cookies,
-        debug,
-        dry_run,
         force,
         recheck_after,
         recheck_all,
         jobs,
         limit,
-        no_wait,
-        output_folder,
-        album_path,
-        state: state_option,
         user,
     } = args;
 
-    let cookies_file = cookies.map(|p| {
-        let expanded = shellexpand::tilde(&p);
-        expanded.into_owned()
-    });
-    let root = shellexpand::tilde(&output_folder);
-    let root = Path::new(root.as_ref());
+    let context = common.build()?;
+    let root = context.root.as_path();
     let limit = limit.unwrap_or(usize::MAX);
+    let debug = common.debug;
+    let dry_run = common.dry_run;
 
-    // Validate the layout before doing any work, so a typo fails immediately
-    // rather than being written into every folder name on disk.
-    let album_path = AlbumPath::new(&album_path)?;
-
-    let root_exists = match fs::metadata(root) {
-        Ok(d) => Some(d.is_dir()),
-        Err(_) => None,
-    };
-
-    match root_exists {
-        Some(true) => (),
-        Some(false) => {
-            error!("Cannot use `output-folder`, as it is not a folder. Please delete it and create as a directory, or try a different path.");
-            std::process::exit(1);
-        }
-        None => fs::create_dir_all(root)?,
-    }
-
-    let state_path = state_option
-        .map(|p| PathBuf::from(shellexpand::tilde(&p).into_owned()))
-        .unwrap_or_else(|| root.join(state::STATE_FILENAME));
-
-    // Held for the whole run. Bound to a name rather than discarded so that the
-    // lock lives until this function returns; SQLite protects the database, this
-    // protects the library on disk from a concurrent run. Keyed to the output
-    // folder rather than the state database, because the output folder is the
-    // resource being protected.
-    let _lock = lock::RunLock::acquire(&lock::lock_path_for(root), !no_wait)?;
-
-    let state: SharedState = Arc::new(Mutex::new(State::open(&state_path)?));
-    {
-        let guard = state
-            .lock()
-            .map_err(|_| io::Error::other("state lock poisoned"))?;
-        let imported = guard.import_legacy_cache(root)?;
-        if imported > 0 {
-            info!(
-                "Imported {imported} entries from the legacy `{}` cache; it is no longer read.",
-                state::LEGACY_CACHE_FILENAME
-            );
-        }
-    }
-
-    // `--recheck-all` means "every release is due for a comparison now";
-    // `--force` means "download everything without comparing".
+    // `--recheck-all` makes every release due for a comparison now; `--force`
+    // downloads everything without comparing.
     let policy = RecheckPolicy {
         force,
         after_days: if recheck_all { Some(0) } else { recheck_after },
     };
 
-    let cookies = cookies::get_bandcamp_cookies(cookies_file.as_deref())?;
-    let api = Arc::new(api::Api::new(cookies));
-
-    let download_urls = api
+    let download_urls = context
+        .api
         .get_download_urls(&user, artist.as_ref(), album.as_ref())?
         .download_urls;
 
     let now = Utc::now();
     let (items, to_download, to_recheck, up_to_date) = {
-        let guard = state
-            .lock()
-            .map_err(|_| io::Error::other("state lock poisoned"))?;
         let mut items = Vec::new();
         let mut to_download = 0usize;
         let mut to_recheck = 0usize;
@@ -233,7 +128,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             if items.len() >= limit {
                 break;
             }
-            let entry = guard.get(&id)?;
+            let entry = context.state.get(&id)?;
             match policy.decide(entry.as_ref(), download.is_preorder, now) {
                 Action::Skip => up_to_date += 1,
                 Action::Download => {
@@ -273,12 +168,17 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // A plain queue. Popping is a short critical section and the download that
-    // follows deliberately happens without holding the lock.
+    // A plain queue. Popping is a short critical section, and the download that
+    // follows runs without holding the lock.
     let queue = Arc::new(Mutex::new(VecDeque::from(items)));
     let m = Arc::new(MultiProgress::new());
     let dry_run_results = Arc::new(Mutex::new(Vec::<String>::new()));
     let updated = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // Per-thread clones of the shared handles.
+    let state: SharedState = context.state.clone();
+    let api = context.api.clone();
+    let album_path = context.album_path.clone();
 
     thread::scope(|scope| {
         for i in 0..jobs {
@@ -412,13 +312,8 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         download.is_preorder,
                         Utc::now(),
                     );
-                    match state.lock() {
-                        Ok(guard) => {
-                            if let Err(e) = guard.upsert(&record) {
-                                warn!("failed to record state for {id}: {e}");
-                            }
-                        }
-                        Err(_) => warn!("state lock poisoned, not recording {id}"),
+                    if let Err(e) = state.upsert(&record) {
+                        warn!("failed to record state for {id}: {e}");
                     }
                 }
             });
@@ -461,21 +356,13 @@ fn recheck_needed(
     advertised: Option<&str>,
     record: bool,
 ) -> Option<bool> {
-    let guard = match state.lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            warn!("state lock poisoned, skipping re-check of {id}");
-            return None;
-        }
-    };
-
-    match guard.get(id) {
+    match state.get(id) {
         // A missing row is unexpected during a re-check, so treat it as changed.
         Ok(None) => Some(true),
         Ok(Some(entry)) => {
             let changed = state::fingerprint_changed(&entry, advertised);
             if !changed && record {
-                if let Err(e) = guard.touch_checked(id, Utc::now()) {
+                if let Err(e) = state.touch_checked(id, Utc::now()) {
                     warn!("failed to record check for {id}: {e}");
                 }
             }

@@ -1,36 +1,28 @@
 use crate::{
-    api,
-    cmds::AUDIO_FORMATS,
-    cookies,
-    library::AlbumPath,
-    lock,
-    state::{self, ItemState, State, StateEntry},
+    cmds::{CommonArgs, AUDIO_FORMATS},
+    state::{ItemState, StateEntry},
     util,
 };
 use chrono::Utc;
 use clap::{builder::PossibleValuesParser, Args as ClapArgs};
 use indicatif::MultiProgress;
-use std::{
-    error::Error,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::error::Error;
 
 /// Re-download a single purchase, bypassing the state cache.
 ///
-/// This exists because Bandcamp has no change feed. When an artist replaces a
-/// release's audio, or a pre-order finally ships, nothing about the purchase or
-/// its ID changes - so picking up an update on demand means asking for that one
-/// release again rather than waiting for a comparison sweep.
+/// Bandcamp has no change feed, and when an artist replaces a release's audio,
+/// or a pre-order ships, neither the purchase nor its ID changes. Picking up
+/// such an update on demand means requesting that one release again, without
+/// waiting for a comparison sweep.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// A Bandcamp download page URL (https://bandcamp.com/download/...), or a
-    /// collection sale-item key such as `p1234`. The key is the value inside the
-    /// `[p1234]` suffix of each release folder.
+    /// collection sale-item key such as `p1234` (the `[p1234]` suffix of a
+    /// release folder).
     target: String,
 
-    #[arg(short, long, value_name = "COOKIES_FILE", env = "BS_COOKIES")]
-    cookies: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
 
     /// Bandcamp username. Required when resolving a sale-item key, because the
     /// key can only be found by reading your collection listing.
@@ -46,81 +38,17 @@ pub struct Args {
         env = "BS_FORMAT"
     )]
     audio_format: String,
-
-    /// The folder to extract the release to.
-    #[arg(
-        short,
-        long = "output-folder",
-        value_name = "FOLDER",
-        default_value = "./",
-        env = "BS_OUTPUT_FOLDER"
-    )]
-    output_folder: String,
-
-    /// Folder layout for the release, relative to the output folder.
-    ///
-    /// Placeholders: {artist}, {album}, {year}, {id}. Must match the layout the
-    /// release was originally downloaded with, or the re-download will land
-    /// beside the existing folder instead of replacing it.
-    #[arg(
-        long,
-        value_name = "TEMPLATE",
-        default_value = crate::library::DEFAULT_ALBUM_PATH,
-        env = "BS_ALBUM_PATH"
-    )]
-    album_path: String,
-
-    /// Path to the state database. Defaults to `.bandsnatch-state.db` inside the
-    /// output folder.
-    #[arg(long, value_name = "PATH", env = "BS_STATE")]
-    state: Option<String>,
-
-    /// Enables some extra debug output in certain scenarios.
-    #[arg(long, env = "BS_DEBUG")]
-    debug: bool,
-
-    /// Report what would happen without downloading or writing anything.
-    #[arg(short = 'd', long = "dry-run")]
-    dry_run: bool,
-
-    /// Fail immediately instead of waiting when another run holds the lock.
-    #[arg(long, env = "BS_NO_WAIT")]
-    no_wait: bool,
 }
 
 pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
     let Args {
         target,
-        cookies,
+        common,
         user,
         audio_format,
-        output_folder,
-        album_path,
-        state: state_option,
-        debug,
-        dry_run,
-        no_wait,
     } = args;
 
-    let cookies_file = cookies.map(|p| {
-        let expanded = shellexpand::tilde(&p);
-        expanded.into_owned()
-    });
-    let root = shellexpand::tilde(&output_folder);
-    let root = Path::new(root.as_ref());
-    fs::create_dir_all(root)?;
-
-    let album_path = AlbumPath::new(&album_path)?;
-
-    let state_path = state_option
-        .map(|p| PathBuf::from(shellexpand::tilde(&p).into_owned()))
-        .unwrap_or_else(|| root.join(state::STATE_FILENAME));
-
-    // Keyed to the output folder, the resource this lock actually protects.
-    let _lock = lock::RunLock::acquire(&lock::lock_path_for(root), !no_wait)?;
-
-    let cookies = cookies::get_bandcamp_cookies(cookies_file.as_deref())?;
-    let api = api::Api::new(cookies);
+    let context = common.build()?;
 
     // A sale-item key can only be resolved through the collection listing; a
     // direct download page URL needs no lookup at all.
@@ -131,7 +59,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         let user = user.as_deref().ok_or(
             "resolving a sale-item key needs --user (or BS_USER); pass a full download URL instead",
         )?;
-        let page = api.get_download_urls(user, None, None)?;
+        let page = context.api.get_download_urls(user, None, None)?;
         let download = page
             .download_urls
             .get(&target)
@@ -143,14 +71,16 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         )
     };
 
-    let item = api
-        .get_digital_item(&page_url, &debug)?
+    let item = context
+        .api
+        .get_digital_item(&page_url, &common.debug)?
         .ok_or_else(|| format!("could not read any digital item from {page_url}"))?;
 
     if item.downloads.is_none() {
         return Err(format!(
             "no downloads are available for {} - {}",
-            item.artist, item.title
+            util::display_safe(&item.artist),
+            util::display_safe(&item.title)
         )
         .into());
     }
@@ -166,21 +96,20 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         .or_else(|| item.item_id.map(|id| format!("p{id}")))
         .ok_or("could not determine an identifier for this release; pass its sale-item key instead")?;
 
-    let state = State::open(&state_path)?;
-
-    // Without a collection listing we cannot tell whether this is still a
-    // preorder, so preserve whatever we already recorded rather than guessing.
+    // Without a collection listing there is no way to tell whether this is still
+    // a preorder, so preserve whatever was recorded rather than guessing.
     let is_preorder = if from_listing {
         listed_as_preorder
     } else {
-        state
+        context
+            .state
             .get(&id)?
             .map(|entry| entry.state == ItemState::Preorder)
             .unwrap_or(false)
     };
 
-    let path = album_path.render(
-        root,
+    let path = context.album_path.render(
+        &context.root,
         &item.artist,
         &item.title,
         item.release_year().as_deref(),
@@ -188,7 +117,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
     )?;
     println!(
         "{} {} - {} ({}) -> {}",
-        if dry_run {
+        if common.dry_run {
             "Would re-download"
         } else {
             "Re-downloading"
@@ -199,12 +128,14 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         path.display()
     );
 
-    if dry_run {
+    if common.dry_run {
         return Ok(());
     }
 
     let m = MultiProgress::new();
-    let content_length = api.download_item(&item, &path, &audio_format, &m)?;
+    let content_length = context
+        .api
+        .download_item(&item, &path, &audio_format, &m)?;
 
     let record = StateEntry::downloaded(
         &id,
@@ -217,7 +148,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         is_preorder,
         Utc::now(),
     );
-    state.upsert(&record)?;
+    context.state.upsert(&record)?;
 
     println!("Done.");
 

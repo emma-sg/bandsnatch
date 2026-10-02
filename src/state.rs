@@ -15,12 +15,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 /// Default state database name, created inside the output folder.
 pub const STATE_FILENAME: &str = ".bandsnatch-state.db";
 
 /// Cache file written by bandsnatch <= 0.3 and by Ezwen's
-/// `bandcamp-collection-downloader`, which we import once.
+/// `bandcamp-collection-downloader`; imported once.
 pub const LEGACY_CACHE_FILENAME: &str = "bandcamp-collection-downloader.cache";
 
 /// Marker the legacy format uses to record a release that was still a preorder
@@ -248,8 +249,17 @@ pub fn fingerprint_changed(entry: &StateEntry, advertised_size_mb: Option<&str>)
     }
 }
 
+/// The SQLite state store.
+///
+/// Access is serialised internally, so one `State` can be shared across the
+/// download workers as an `Arc<State>`; callers do not need to know that
+/// `rusqlite::Connection` is `Send` but not `Sync`.
+///
+/// Convention for callers: state operations are advisory. Log a failed write and
+/// carry on with the download, because the library on disk is the source of
+/// truth, and a missing or stale row costs at worst a redundant download.
 pub struct State {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl State {
@@ -269,20 +279,32 @@ impl State {
              PRAGMA busy_timeout = 10000;",
         )?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
-    fn meta_get(&self, key: &str) -> Result<Option<String>, Box<dyn Error>> {
-        Ok(self
-            .conn
+    fn conn(&self) -> Result<MutexGuard<'_, Connection>, Box<dyn Error>> {
+        self.conn
+            .lock()
+            .map_err(|_| "the state database lock is poisoned; a worker thread panicked".into())
+    }
+
+    /// Read a `meta` value using an already-held connection.
+    ///
+    /// Associated rather than a method so a caller can hold the lock across
+    /// several statements: the mutex is not reentrant, so a method that locked
+    /// again would deadlock.
+    fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, Box<dyn Error>> {
+        Ok(conn
             .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |row| {
                 row.get(0)
             })
             .optional()?)
     }
 
-    fn meta_set(&self, key: &str, value: &str) -> Result<(), Box<dyn Error>> {
-        self.conn.execute(
+    fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), Box<dyn Error>> {
+        conn.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
@@ -290,25 +312,17 @@ impl State {
         Ok(())
     }
 
-    pub fn is_empty(&self) -> Result<bool, Box<dyn Error>> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?;
-        Ok(count == 0)
-    }
-
     /// Row count, used by tests to assert that imports and upserts do not
     /// duplicate releases.
     #[cfg(test)]
     pub fn len(&self) -> Result<i64, Box<dyn Error>> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?)
+        let conn = self.conn()?;
+        Ok(conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<StateEntry>, Box<dyn Error>> {
-        Ok(self
-            .conn
+        let conn = self.conn()?;
+        Ok(conn
             .query_row(
                 "SELECT id, artist, title, release_year, format, state, size_mb,
                         content_length, description, downloaded_at, checked_at
@@ -338,7 +352,8 @@ impl State {
     }
 
     pub fn upsert(&self, entry: &StateEntry) -> Result<(), Box<dyn Error>> {
-        self.conn.execute(
+        let conn = self.conn()?;
+        conn.execute(
             "INSERT INTO items (id, artist, title, release_year, format, state,
                                 size_mb, content_length, description,
                                 downloaded_at, checked_at)
@@ -373,7 +388,8 @@ impl State {
 
     /// Record that we looked at a release and its fingerprint had not changed.
     pub fn touch_checked(&self, id: &str, now: DateTime<Utc>) -> Result<(), Box<dyn Error>> {
-        self.conn.execute(
+        let conn = self.conn()?;
+        conn.execute(
             "UPDATE items SET checked_at = ?2 WHERE id = ?1",
             params![id, now.to_rfc3339()],
         )?;
@@ -390,9 +406,19 @@ impl State {
     /// again. The once-only behaviour is enforced internally by a `meta` row, so
     /// calling it more than once is harmless.
     pub fn import_legacy_cache(&self, dir: &Path) -> Result<usize, Box<dyn Error>> {
-        if self.meta_get("legacy_imported")?.is_some() || !self.is_empty()? {
+        // One lock for the whole import. The mutex is not reentrant, and the
+        // check-then-insert sequence should not interleave with another writer.
+        let conn = self.conn()?;
+
+        if Self::meta_get(&conn, "legacy_imported")?.is_some() {
             return Ok(0);
         }
+        let already_populated: i64 =
+            conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?;
+        if already_populated > 0 {
+            return Ok(0);
+        }
+
         let legacy = dir.join(LEGACY_CACHE_FILENAME);
         if !legacy.is_file() {
             return Ok(0);
@@ -417,13 +443,13 @@ impl State {
                 .unwrap_or(description)
                 .trim();
 
-            let inserted = self.conn.execute(
+            let inserted = conn.execute(
                 "INSERT OR IGNORE INTO items (id, state, description) VALUES (?1, ?2, ?3)",
                 params![id, state.as_str(), description],
             )?;
             imported += inserted;
         }
-        self.meta_set("legacy_imported", &Utc::now().to_rfc3339())?;
+        Self::meta_set(&conn, "legacy_imported", &Utc::now().to_rfc3339())?;
         Ok(imported)
     }
 }
