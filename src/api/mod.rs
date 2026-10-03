@@ -16,6 +16,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::str;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod structs;
 use crate::api::structs::*;
@@ -78,6 +79,38 @@ struct PostCollectionBody<'a> {
 }
 
 const MAX_RETRIES: u8 = 5;
+
+/// Waits between rate-limit retries: this long for the first retry, doubled for
+/// each attempt after it, never longer than the cap, plus up to half again at
+/// random so that retries from several threads or containers do not line up.
+const RATE_LIMIT_BASE: Duration = Duration::from_secs(10);
+const RATE_LIMIT_MAX: Duration = Duration::from_secs(300);
+
+/// How long to wait before retrying a rate-limited request.
+///
+/// `attempt` counts from one. A limit that has not lifted will not be talked
+/// out of it, so the wait grows; the random half keeps a collection of
+/// containers from returning together.
+fn rate_limit_wait(attempt: u8, jitter: u32) -> Duration {
+    let doublings = u32::from(attempt.saturating_sub(1)).min(8);
+    let base = (RATE_LIMIT_BASE.as_secs() << doublings).min(RATE_LIMIT_MAX.as_secs());
+
+    // Never less than half the wait: backing off to nothing would retry
+    // immediately against the same limit.
+    let half = base / 2;
+    Duration::from_secs(half + u64::from(jitter) % (half + 1))
+}
+
+/// A number that differs between calls, for jitter.
+///
+/// The clock is enough: retries are seconds apart, and nothing here depends on
+/// the value being unpredictable.
+fn retry_jitter() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or(0)
+}
 
 pub struct Api {
     /// Private so nothing can reach past the rate limiter and the retry path:
@@ -194,8 +227,13 @@ impl Api {
                 bail!(format!("reached maximum retries for url {}", url.as_str()));
             }
 
-            warn!("hit ratelimit from Bandcamp, sleeping for 10 seconds");
-            std::thread::sleep(std::time::Duration::from_secs(10));
+            let attempt = retry_attempt + 1;
+            let wait = rate_limit_wait(attempt, retry_jitter());
+            warn!(
+                "rate-limited by Bandcamp; waiting {}s before retrying (attempt {attempt} of at most {MAX_RETRIES})",
+                wait.as_secs()
+            );
+            std::thread::sleep(wait);
             return self.request_with_retry(method, url, body, retry_attempt + 1);
         }
 
@@ -843,5 +881,23 @@ mod tests {
         assert_eq!(safe_download_filename(""), None);
         assert_eq!(safe_download_filename("   "), None);
         assert_eq!(safe_download_filename("\"\""), None);
+    }
+
+    #[test]
+    fn rate_limit_waits_double_until_they_reach_the_cap() {
+        let shortest: Vec<u64> = (1..=6).map(|a| rate_limit_wait(a, 0).as_secs()).collect();
+
+        assert_eq!(shortest, [5, 10, 20, 40, 80, 150]);
+    }
+
+    #[test]
+    fn a_rate_limit_wait_takes_up_to_double_the_backoff_and_no_more() {
+        for attempt in 1..=8u8 {
+            let half = rate_limit_wait(attempt, 0).as_secs();
+            let full = rate_limit_wait(attempt, half as u32).as_secs();
+
+            assert_eq!(full, half * 2, "attempt {attempt}");
+            assert!(full <= RATE_LIMIT_MAX.as_secs(), "attempt {attempt}");
+        }
     }
 }
