@@ -96,7 +96,11 @@ impl AlbumPath {
             // path, so a separator inside a value (an album title containing a
             // slash) would already have become an extra directory level, and a
             // crafted title could escape the output folder.
-            rendered = rendered.replace(&format!("{{{name}}}"), &util::make_string_fs_safe(value));
+            // Values are trimmed to leave room for the template text around
+            // them, so the segment limit below does not cut into the release id.
+            let value = util::make_string_fs_safe(value);
+            rendered =
+                rendered.replace(&format!("{{{name}}}"), &util::limit_template_value(&value));
         }
         let rendered = collapse_empty_groups(&rendered);
 
@@ -119,7 +123,7 @@ impl AlbumPath {
             }
             // Catches separators and illegal characters in the template text
             // itself, which the substitution above does not see.
-            path.push(util::make_string_fs_safe(segment));
+            path.push(util::limit_component(&util::make_string_fs_safe(segment)));
             segments += 1;
         }
 
@@ -304,5 +308,40 @@ mod tests {
         assert!(AlbumPath::new("{artist}/../{album}").is_err());
         assert!(AlbumPath::new("{artist}/{arists}").is_err());
         assert!(AlbumPath::new("{artist}/{album}").is_ok());
+    }
+
+    #[test]
+    fn a_long_album_title_still_names_its_release() {
+        let album_path = AlbumPath::new(DEFAULT_ALBUM_PATH).unwrap();
+        let album = "a".repeat(400);
+
+        let path = album_path
+            .render(Path::new("/music"), "Artist", &album, Some("2026"), "p1234")
+            .unwrap();
+
+        for component in path.strip_prefix("/music").unwrap().components() {
+            let name = component.as_os_str().to_str().unwrap();
+            assert!(name.len() <= util::MAX_COMPONENT_BYTES, "{name}");
+        }
+        assert!(
+            path.to_str().unwrap().contains("[p1234]"),
+            "{}",
+            path.display()
+        );
+
+        // The trimmed name must also be one the filesystem accepts, which is the
+        // failure this guards: creating the folder returned `ENAMETOOLONG`, so
+        // the release was left for the next run, every run.
+        let root =
+            std::env::temp_dir().join(format!("bandsnatch-long-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = album_path
+            .render(&root, "Artist", &album, Some("2026"), "p1234")
+            .unwrap();
+
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(path.is_dir(), "{}", path.display());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
