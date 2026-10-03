@@ -53,7 +53,7 @@ Options:
       --recheck-after <DAYS>    Re-check an already-downloaded release for an in-place update once this many days have passed since it was last checked [env: BS_RECHECK_AFTER=]
       --recheck-all             Re-check every downloaded release during this run, downloading only the ones whose advertised size changed. Cheaper than `--force`, which re-downloads unconditionally [env: BS_RECHECK_ALL=]
   -j, --jobs <JOBS>             The amount of parallel jobs (threads) to use [env: BS_JOBS=] [default: 4]
-  -n, --limit <LIMIT>           Maximum number of releases to process. Useful for testing [env: BS_LIMIT=]
+  -n, --limit <LIMIT>           Maximum number of releases to process, newest purchase first. Useful for testing [env: BS_LIMIT=]
       --no-wait                 Fail immediately instead of waiting when another run holds the lock [env: BS_NO_WAIT=]
   -o, --output-folder <FOLDER>  The folder to extract downloaded releases to [env: BS_OUTPUT_FOLDER=] [default: ./]
       --album-path <TEMPLATE>   Folder layout for each release, relative to the output folder [env: BS_ALBUM_PATH=] [default: "{artist}/{album} ({year}) [{id}]"]
@@ -75,6 +75,10 @@ bandsnatch run -c ./cookies.json -f flac -o ./Music ovyerus
 This would download my entire music collection into a local "Music" folder, and
 also create a `.bandsnatch-state.db` SQLite database recording what was
 retrieved; later runs read it to skip releases that are already downloaded.
+
+Releases are downloaded newest purchase first, so `-n 5` takes the five most
+recently bought ones. A release whose purchase date Bandcamp does not report, or
+reports in a format Bandsnatch cannot read, is left until last.
 
 If a `.cache` file from an earlier version - or from Ezwen's tool, which uses the
 same filename - is present, it is imported into the database once and the old

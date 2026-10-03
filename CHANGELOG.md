@@ -54,6 +54,8 @@ and this project adheres to
   directories and drops to `PUID`/`PGID` exactly as a scheduled run does, so
   `docker exec <container> /entrypoint.sh release <url>` writes files with the
   library's ownership.
+- Download releases newest purchase first, so `--limit` takes the most
+  recently bought ones. Releases with no readable purchase date come last.
 
 ### Fixed
 

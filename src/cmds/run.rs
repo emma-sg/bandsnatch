@@ -1,5 +1,5 @@
 use crate::{
-    api,
+    api::{self, CollectionDownload},
     cmds::{CommonArgs, AUDIO_FORMATS},
     state::{self, Action, RecheckPolicy, State, StateEntry},
     util,
@@ -85,7 +85,8 @@ pub struct Args {
     )]
     jobs: u8,
 
-    /// Maximum number of releases to process. Useful for testing.
+    /// Maximum number of releases to process, newest purchase first. Useful for
+    /// testing.
     #[arg(short = 'n', long, env = "BS_LIMIT")]
     limit: Option<usize>,
 
@@ -143,6 +144,16 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .api
         .get_download_urls(&user, artist.as_ref(), album.as_ref())?
         .download_urls;
+
+    let mut download_urls: Vec<(String, CollectionDownload)> = download_urls.into_iter().collect();
+    let undated = download_urls
+        .iter()
+        .filter(|(_, download)| download.purchased.is_none())
+        .count();
+    if undated > 0 {
+        debug!("{undated} releases have no readable purchase date; they come last");
+    }
+    order_by_purchase(&mut download_urls);
 
     let now = Utc::now();
     let (items, to_download, to_recheck, up_to_date) = {
@@ -417,6 +428,18 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Put the newest purchases first.
+///
+/// `--limit` then takes the releases bought most recently, which is what a
+/// first run or a quick check wants. Releases whose purchase date Bandcamp did
+/// not report, or reported in a format this tool cannot read, come last, and
+/// equal dates fall back to the release id so two runs over the same collection
+/// work through it in the same order.
+fn order_by_purchase(items: &mut [(String, CollectionDownload)]) {
+    items
+        .sort_by(|(a_id, a), (b_id, b)| b.purchased.cmp(&a.purchased).then_with(|| a_id.cmp(b_id)));
+}
+
 /// Whether a re-check should turn into a download.
 ///
 /// `None` means the state was unavailable, so the caller should skip the
@@ -446,5 +469,48 @@ fn recheck_needed(
             warn!("failed to read state for {id}: {e}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDateTime;
+
+    fn download(purchased: Option<&str>) -> CollectionDownload {
+        CollectionDownload {
+            url: format!("https://example.invalid/{purchased:?}"),
+            is_preorder: false,
+            purchased: purchased
+                .map(|raw| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S").unwrap()),
+        }
+    }
+
+    #[test]
+    fn the_newest_purchase_comes_first_and_an_undated_release_comes_last() {
+        let mut items = vec![
+            ("p1".to_owned(), download(Some("2026-06-06T14:23:01"))),
+            ("p2".to_owned(), download(None)),
+            ("p3".to_owned(), download(Some("2026-10-02T17:39:55"))),
+            ("p4".to_owned(), download(Some("2026-08-04T23:43:59"))),
+        ];
+
+        order_by_purchase(&mut items);
+
+        let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["p3", "p4", "p1", "p2"]);
+    }
+
+    #[test]
+    fn releases_bought_at_the_same_time_keep_a_stable_order() {
+        let mut items = vec![
+            ("p9".to_owned(), download(Some("2026-10-02T17:39:55"))),
+            ("p1".to_owned(), download(Some("2026-10-02T17:39:55"))),
+        ];
+
+        order_by_purchase(&mut items);
+
+        let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["p1", "p9"]);
     }
 }
