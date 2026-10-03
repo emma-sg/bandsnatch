@@ -90,6 +90,9 @@ fn safe_download_filename(raw: &str) -> Option<String> {
     }
 
     let safe = util::make_string_fs_safe(component);
+    // A long track title is the easiest way to ask for a name the filesystem
+    // will not take, and it arrives from the server, not from the user.
+    let safe = util::limit_component(&safe);
     if safe.is_empty() {
         return None;
     }
@@ -158,8 +161,7 @@ impl Api {
     ) -> Result<reqwest::Response, Box<dyn Error>> {
         self.ratelimiter.until_ready().block_on();
 
-        let response =
-            Self::build_request(&self.client, method.clone(), url, body).send()?;
+        let response = Self::build_request(&self.client, method.clone(), url, body).send()?;
         let status: http::StatusCode = response.status();
 
         if !status.is_success() {

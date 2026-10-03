@@ -43,6 +43,90 @@ pub fn make_string_fs_safe(s: &str) -> String {
     str
 }
 
+/// Longest a single path component may be, in bytes.
+///
+/// ext4, XFS, APFS and the shfs layer Unraid puts over its array all refuse a
+/// longer name. Release titles and track names can be longer than this, and the
+/// filesystem reports it only as `ENAMETOOLONG`, which says nothing about which
+/// name was too long or by how much.
+pub const MAX_COMPONENT_BYTES: usize = 255;
+
+/// Room to leave for the rest of an `--album-path` segment: brackets, the year
+/// and the release id. A folder keeps its id, which is what identifies it to
+/// other tools, so the values inside a segment are trimmed to leave space for
+/// the text around them.
+const TEMPLATE_SLACK_BYTES: usize = 64;
+
+/// Trim one path component to what the filesystem accepts.
+pub fn limit_component(name: &str) -> String {
+    limit_component_to(name, MAX_COMPONENT_BYTES)
+}
+
+/// Trim one `--album-path` placeholder value.
+///
+/// The value keeps less room than a whole component, so the text around it -
+/// brackets, the year, and the release id - survives the segment limit below.
+pub fn limit_template_value(value: &str) -> String {
+    limit_component_to(value, MAX_COMPONENT_BYTES - TEMPLATE_SLACK_BYTES)
+}
+
+/// Trim one path component to `budget` bytes.
+///
+/// A trimmed name keeps its extension and gains a short hash of the full name,
+/// so two tracks whose titles differ only past the cut do not become the same
+/// file. The hash is FNV-1a rather than the standard library's hasher, whose
+/// output is not promised to stay the same between Rust versions: these names
+/// are written to disk and read again by later runs.
+pub fn limit_component_to(name: &str, budget: usize) -> String {
+    if name.len() <= budget {
+        return name.to_string();
+    }
+
+    let (stem, suffix) = match split_extension(name) {
+        Some((stem, extension)) => (stem, format!("-{:08x}.{extension}", fnv1a(name))),
+        None => (name, format!("-{:08x}", fnv1a(name))),
+    };
+
+    // The suffix is short, so this cannot underflow, but a nonsensical budget
+    // should still not panic.
+    let room = budget.saturating_sub(suffix.len());
+    format!("{}{suffix}", take_bytes(stem, room))
+}
+
+/// Split `name` into a stem and an extension, when the tail looks like one.
+fn split_extension(name: &str) -> Option<(&str, &str)> {
+    let (stem, extension) = name.rsplit_once('.')?;
+    let looks_like_one = !stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 10
+        && !extension.contains('/');
+    looks_like_one.then_some((stem, extension))
+}
+
+/// The longest prefix of `s` that fits in `max` bytes, without splitting a
+/// character.
+fn take_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// FNV-1a, for a short name suffix that stays the same between runs and
+/// versions. Not for anything that needs to resist collision on purpose.
+fn fnv1a(s: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in s.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
 /// Remove characters that could control a terminal or fake a log line.
 ///
 /// Release titles, artist names and track names come from Bandcamp metadata,
@@ -300,5 +384,40 @@ mod tests {
         let escaped = staging_dir(&target, "../../evil").unwrap();
         assert_eq!(escaped.parent().unwrap(), target.parent().unwrap());
         assert_eq!(escaped.components().count(), 4);
+    }
+
+    #[test]
+    fn a_name_that_fits_is_left_alone() {
+        let name = "01 - A Reasonable Track Title.flac";
+
+        assert_eq!(limit_component(name), name);
+    }
+
+    #[test]
+    fn a_long_name_is_trimmed_to_what_a_filesystem_takes() {
+        let name = format!("{}.flac", "t".repeat(300));
+        let limited = limit_component(&name);
+
+        assert!(limited.len() <= MAX_COMPONENT_BYTES, "{limited}");
+        assert!(limited.ends_with(".flac"), "{limited}");
+    }
+
+    #[test]
+    fn trimming_a_name_does_not_split_a_character() {
+        // Every character is two bytes, so a cut at an even offset would land
+        // inside one.
+        let name = "é".repeat(300);
+        let limited = limit_component(&name);
+
+        assert!(limited.len() <= MAX_COMPONENT_BYTES, "{}", limited.len());
+        assert!(limited.starts_with('é'));
+    }
+
+    #[test]
+    fn two_long_names_that_differ_at_the_end_stay_different() {
+        let first = format!("{}-one.flac", "t".repeat(300));
+        let second = format!("{}-two.flac", "t".repeat(300));
+
+        assert_ne!(limit_component(&first), limit_component(&second));
     }
 }
