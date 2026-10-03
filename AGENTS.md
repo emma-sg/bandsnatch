@@ -2,22 +2,27 @@
 
 ## Project Overview
 
-Bandsnatch is a Rust CLI that downloads a logged-in user's Bandcamp collection in a chosen audio format. Repeated runs use a local cache to avoid downloading the same purchases again. Authentication comes from exported Bandcamp cookies; the tool does not log in for the user.
+Bandsnatch is a Rust CLI that downloads a logged-in user's Bandcamp collection in a chosen audio format. Repeated runs consult a local SQLite state database to avoid downloading the same purchases again, and to notice releases whose audio was replaced after purchase. Authentication comes from exported Bandcamp cookies; the tool does not log in for the user.
 
 ## Architecture & Data Flow
 
-- `src/main.rs` initializes logging, parses clap subcommands, and dispatches `run` or `debug-collection`. `src/cmds/release.rs` is not wired into the CLI.
-- `src/cmds/run.rs` loads cookies, creates an `Api`, obtains collection release IDs/URLs, filters against the cache (unless `--force`), applies `--limit`, and distributes releases to scoped worker threads.
-- `src/api/mod.rs` uses blocking `reqwest`: scrape Bandcamp page data, paginate the collection, resolve digital items, then download the requested format. Albums are ZIP-extracted; single tracks are retained as files. `src/api/structs/` contains the serde models and destination-path logic.
-- `src/util.rs` provides the shared FIFO work queue, filename sanitization, and progress-aware copying. Workers share the API, queue, cache, and results with `Arc`/`Mutex`; there is no async runtime in the active CLI. Most API requests use a rate-limited retry helper, but collection pagination and `debug-collection` make direct requests.
-- `src/cache.rs` reads/appends `<output-folder>/bandcamp-collection-downloader.cache` entries as `id| description`. Preserve collection ID identity: failed downloads must not be cached; successful downloads are cached, while missing items and items with no downloads are deliberately marked skipped. `--dry-run` avoids downloads but can still cache those skip cases.
+- `src/main.rs` initializes logging, parses clap subcommands, and dispatches `run`, `release`, or `debug-collection`.
+- `src/cmds.rs` declares the subcommands, the flags they share (`CommonArgs`, flattened into each command's own arguments), the audio format list, and `Context::build`, which performs the shared setup in the one order that is correct: validate the album path, ensure the output folder exists, resolve the state path, take the run lock, open the state store (importing any legacy cache before the first recheck decision), then build the HTTP client. Keep that sequence in `build` rather than in a command.
+- `src/cmds/run.rs` obtains collection release IDs/URLs, applies a `RecheckPolicy` (`--force` being its unconditional case) and `--limit`, and distributes releases to scoped worker threads.
+- `src/cmds/release.rs` re-downloads a single release by sale-item key or download URL, bypassing the state cache for that release.
+- `src/api/mod.rs` uses blocking `reqwest`: scrape Bandcamp page data, paginate the collection, resolve digital items, then download the requested format. Albums are ZIP-extracted; single tracks are retained as files. Downloads are unpacked into a staging directory beside the target and swapped into place by `util::replace_directory`, so a failed download cannot destroy an existing release. Both hidden names a swap uses - the staging directory and the moved-aside copy - come from `util::staging_dir`/`util::previous_dir` and carry the release id, because an `--album-path` without `{id}` can point two releases at one path while several workers run at once. `src/api/structs/` holds the serde models; destination paths come from `src/library.rs`.
+- `src/state.rs` is the SQLite state store (`<output-folder>/.bandsnatch-state.db`, overridable with `--state`): per-release state, the advertised archive size used for change detection, and a one-time import of the legacy `bandcamp-collection-downloader.cache`. It serialises access internally, so callers share it as `Arc<State>` and never hold a lock themselves. Preserve the distinctions it encodes: failed downloads must not be recorded; successful downloads record a fingerprint; missing items and items with no downloads are recorded as skipped, and never at the cost of an existing completed download, because that would erase the fingerprint and drop the release out of change detection permanently (`State::record_unavailable` enforces this); a release seen while Bandcamp still reported it as a preorder stays `preorder` so it is retried once released.
+- `src/lock.rs` takes an exclusive `flock` on `<output-folder>/.bandsnatch.lock`, keyed to the output folder because that is the protected resource, not the state database. Advisory locking does nothing on platforms that are not unix.
+- `src/library.rs` validates and renders the `--album-path` template, and refuses to produce a path that is not a strict descendant of the output folder.
+- `src/util.rs` provides filename sanitization, display sanitization for remote metadata, progress-aware copying, and `replace_directory` (whose staging and previous directory names both come from one helper, so the two always match, and whose caller-supplied token is escaped so it cannot escape the album's parent directory). Workers share the API (`Arc<Api>`), state (`Arc<State>`), queue, and results with `Arc`/`Mutex`; there is no async runtime in the active CLI. Most API requests go through a rate-limited retry helper; collection pagination issues its own requests.
+- `Dockerfile` and `docker/entrypoint.sh` wrap the same one-shot CLI: a multi-stage alpine/musl build, plus a supervisor that owns the schedule, drops privileges to `PUID`/`PGID`, and runs the sync backgrounded so that its SIGTERM trap can forward the signal - a shell defers traps while a foreground child runs, so a foreground sync would never receive `docker stop`.
 
 ## Key Directories
 
-- `src/cmds/`: user-facing command arguments and workflows (`run.rs`, `debug_collection.rs`).
+- `src/cmds/`: user-facing command arguments and workflows (`cmds.rs` for the shared flags and context, plus `run.rs`, `release.rs`, `debug_collection.rs`).
 - `src/api/`: Bandcamp HTTP/page parsing, downloads, and serde models in `structs/`.
 - `test/`: saved download/cache data, **not** an automated test suite; it is ignored by Git.
-- `.github/workflows/`: cross-platform build and release CI.
+- `.github/workflows/`: cross-platform build and release CI, plus `container.yaml`, which publishes the image to GHCR - amd64 on `main`, amd64 and arm64 on version tags.
 
 ## Development Commands
 
@@ -31,18 +36,18 @@ cargo clippy --all-targets        # optional local lint check
 nix build                         # CI-style Linux/macOS flake build
 ```
 
-For a real authenticated run: `cargo run -- run -c ./cookies.json -f flac -o ./Music <username>`. Use `--dry-run --limit 1` for a limited manual check; dry-run still queries Bandcamp and can write skipped-item cache entries. No standalone project scripts were found.
+For a real authenticated run: `cargo run -- run -c ./cookies.json -f flac -o ./Music <username>`. Use `--dry-run --limit 1` for a limited manual check. A dry run still queries Bandcamp and records releases Bandcamp reports as unavailable, matching the skip behaviour above, but it does not record check timestamps. No standalone project scripts were found.
 
 ## Code Conventions & Common Patterns
 
 - Rust 2021; modules/functions/fields use `snake_case`, types `PascalCase`. Follow neighboring clap derive `#[arg(..., env = "BS_...")]` and serde model definitions rather than inventing parallel configuration paths.
-- Commands and API methods generally return `Result<_, Box<dyn std::error::Error>>`; worker-level `skip_err!` logs a warning and continues. Some malformed input/response paths still use `unwrap`/`expect` or skip errors silently: inspect the actual caller before changing failure behavior.
-- I/O is synchronous (`reqwest::blocking`); bounded scoped threads and a mutex-backed queue provide parallelism. Keep lock-protected cache access and the distinction between successful downloads, intentional skips, and failures.
-- Cookie loading lives in `src/cookies.rs` (JSON exports or Netscape-style text); output/cache paths are handled by `run.rs`. Avoid committing real cookies, downloaded audio, or generated caches.
+- Commands and API methods generally return `Result<_, Box<dyn std::error::Error>>`; worker loops match on the result, log a warning and continue rather than aborting the run. Malformed input or response data must become an error rather than a panic: a panic on a worker thread poisons the queue and the run's `thread::scope(..).unwrap()` turns it into an aborted run, so one unexpected page would cost the whole collection. `src/cookies.rs` is the deliberate exception, exiting with a message naming a missing cookie file.
+- I/O is synchronous (`reqwest::blocking`); bounded scoped threads and a mutex-backed queue provide parallelism. Keep the distinctions the state store encodes (successful downloads, deliberate skips, failures) and the run lock's guarantee that two invocations never touch one output folder at the same time.
+- Cookie loading lives in `src/cookies.rs` (JSON exports or Netscape-style text); output paths are built by `src/library.rs`, and the state database path is resolved in `run.rs`/`release.rs`. Values taken from remote metadata must be sanitized before they reach the filesystem: `util::make_string_fs_safe` for names, `safe_download_filename` for the `Content-Disposition` filename. Avoid committing real cookies, downloaded audio, or generated state files.
 
 ## Important Files
 
-`src/main.rs` (entry/dispatch), `src/cmds/run.rs` (main workflow/options), `src/api/mod.rs` (Bandcamp requests/downloads), `src/api/structs/digital_item.rs` (release metadata/path), `src/cache.rs` (cache format), `src/cookies.rs` (authentication), `src/util.rs` (queue/copy), `README.md` (user-facing usage), `CHANGELOG.md` (Keep a Changelog/SemVer history).
+`src/main.rs` (entry/dispatch), `src/cmds.rs` (shared flags and setup order), `src/cmds/run.rs` (collection workflow/options), `src/cmds/release.rs` (single-release re-download), `src/api/mod.rs` (Bandcamp requests/downloads), `src/api/structs/digital_item.rs` (release metadata), `src/state.rs` (SQLite state and change-detection fingerprints), `src/library.rs` (album path template), `src/lock.rs` (run lock), `src/cookies.rs` (authentication), `src/util.rs` (sanitization, copy, atomic swap), `README.md` (user-facing usage), `CHANGELOG.md` (Keep a Changelog/SemVer history).
 
 ## Runtime/Tooling Preferences
 
@@ -50,4 +55,4 @@ Cargo is the package manager; `Cargo.toml` sets minimum Rust 1.82.0 and `rust-to
 
 ## Testing & QA
 
-There are currently no Rust test cases or test-specific dependencies; `cargo test` alone gives no behavioral coverage. CI builds binaries but does not run tests, clippy, or rustfmt (the workflow notes lint/format work as TODO; Nix packaging disables checks). For behavioral changes, exercise the changed CLI path with an appropriate cookie-backed run or a focused isolated test; prefer `--dry-run --limit 1` when network/authentication are available. Never treat files in `test/` as a test harness or commit private cookie fixtures.
+Inline `#[cfg(test)]` unit tests cover the state store and its legacy import, the recheck/fingerprint decision, the album path template, the atomic directory swap, and the run lock; run them with `cargo test`. CI builds binaries but does not run tests, clippy, or rustfmt (the workflow notes lint/format work as TODO; Nix packaging disables checks). For behavioral changes, exercise the changed CLI path: prefer `--dry-run --limit 1` when network/authentication are available, and add or extend a focused unit test for pure logic. Never treat files in `test/` as a test harness or commit private cookie fixtures.

@@ -38,3 +38,5 @@ url = "2.4"
 zip = "2.1"
 nonzero_ext = "0.3.0"
 pollster = "0.3.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+libc = "0.2.189"
