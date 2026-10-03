@@ -25,6 +25,27 @@ pub struct BandcampPage {
     pub download_urls: HashMap<String, CollectionDownload>,
 }
 
+/// Title and artist of an album or track page.
+#[derive(Debug)]
+pub struct TralbumPage {
+    pub title: String,
+    pub artist: String,
+}
+
+/// Read the title and artist out of a page's JSON-LD block.
+///
+/// A missing field is an error rather than a panic: Bandcamp changes its markup,
+/// and a panic would take a whole run down.
+fn parse_tralbum_page(json: &str, url: &str) -> Result<TralbumPage, Box<dyn Error>> {
+    let parsed: PageJsonLd = serde_json::from_str(json)
+        .map_err(|e| format!("failed to parse the page data at {url}: {e}"))?;
+
+    Ok(TralbumPage {
+        title: parsed.name,
+        artist: parsed.by_artist.name,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct CollectionDownload {
     pub url: String,
@@ -379,6 +400,28 @@ impl Api {
         Ok(parsed.digital_items.first().cloned())
     }
 
+    /// Read the title and artist from an album or track page.
+    ///
+    /// A page URL is what is to hand, but a page names the release rather than
+    /// the sale item, so it is only useful once matched against the collection
+    /// listing, which holds the download this tool can fetch.
+    pub fn get_tralbum_page(&self, url: &str) -> Result<TralbumPage, Box<dyn Error>> {
+        debug!("Reading album or track page information for {url}");
+        let body = self.request(Method::GET, url)?.text()?;
+        let soup = Soup::new(&body);
+
+        let ld = soup
+            .attr("type", "application/ld+json")
+            .find()
+            .ok_or_else(|| {
+                format!(
+                    "could not find the JSON-LD block at {url}; is that an album or track page?"
+                )
+            })?;
+
+        parse_tralbum_page(&ld.text(), url)
+    }
+
     /// Unpack a download into a staging directory.
     ///
     /// Albums arrive as a zip that is expanded in place; singles are kept as the
@@ -539,9 +582,28 @@ impl Api {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_download_filename, Api};
+    use super::{parse_tralbum_page, safe_download_filename, Api};
     use http::Method;
     use std::path::PathBuf;
+
+    #[test]
+    fn an_album_page_is_read_from_its_json_ld() {
+        let json = r#"{"@type":"MusicAlbum","name":"humblewrap.","byArtist":{"@type":"MusicGroup","name":"cali cartier"}}"#;
+        let page = parse_tralbum_page(json, "https://example.invalid/album/humblewrap").unwrap();
+
+        assert_eq!(page.title, "humblewrap.");
+        assert_eq!(page.artist, "cali cartier");
+    }
+
+    #[test]
+    fn a_page_with_no_json_ld_artist_is_an_error() {
+        let json = r#"{"@type":"MusicAlbum","name":"humblewrap."}"#;
+        let err = parse_tralbum_page(json, "https://example.invalid/album/humblewrap")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("byArtist"), "{err}");
+    }
 
     /// The collection pagination POST used to reach Bandcamp without going
     /// through the limiter, so a large collection could page as fast as the

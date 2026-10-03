@@ -34,6 +34,9 @@ and this project adheres to
   recorded, and log each release as it starts and when it finishes, with the
   size of the download. Each run then ends with a count of releases downloaded,
   re-downloaded, unchanged, skipped and failed.
+- `release` accepts an album or track page URL, and looks it up in your
+  collection to find the purchase behind it, so a re-download can start from a
+  link you already have.
 
 ### Changed
 
@@ -47,6 +50,10 @@ and this project adheres to
 - Check `RUN_AT` before the first run rather than after it, and say that a
   release whose download information could not be read will be retried, instead
   of reporting it as skipped.
+- A one-off command run through the container's entrypoint prepares its
+  directories and drops to `PUID`/`PGID` exactly as a scheduled run does, so
+  `docker exec <container> /entrypoint.sh release <url>` writes files with the
+  library's ownership.
 
 ### Fixed
 

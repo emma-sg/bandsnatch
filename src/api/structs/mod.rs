@@ -65,6 +65,22 @@ pub struct ParsedItemsData {
     pub digital_items: Vec<DigitalItem>,
 }
 
+/// The JSON-LD block of an album or track page.
+///
+/// Only the fields this tool needs; Bandcamp's block is a full schema.org
+/// document for the release.
+#[derive(Deserialize, Debug)]
+pub struct PageJsonLd {
+    pub name: String,
+    #[serde(rename = "byArtist")]
+    pub by_artist: PageArtist,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PageArtist {
+    pub name: String,
+}
+
 // #[derive(Deserialize, Debug)]
 // pub struct ParsedStatDownload {
 //     pub download_url: String,
