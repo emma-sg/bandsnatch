@@ -58,7 +58,16 @@
         cargo = toolchain;
         rustc = toolchain;
       };
-      TARGET_CC = "${pkgsCross.stdenv.cc}/bin/${pkgsCross.stdenv.cc.targetPrefix}cc";
+
+      # Darwin host targets build with the host's own compiler. The cross
+      # compiler adds a search path under lib/<triple> that a native build does
+      # not have, and links -liconv, which is then not found.
+      cc =
+        if hostSystem == targetSystem && pkgs.stdenv.hostPlatform.isDarwin
+        then pkgs.stdenv.cc
+        else pkgsCross.stdenv.cc;
+
+      TARGET_CC = "${cc}/bin/${cc.targetPrefix}cc";
     in
       naersk-lib.buildPackage {
         src = ./.;
