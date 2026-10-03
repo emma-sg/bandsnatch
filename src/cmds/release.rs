@@ -215,6 +215,7 @@ mod tests {
         CollectionDownload {
             url: url.to_owned(),
             is_preorder: false,
+            purchased: None,
         }
     }
 

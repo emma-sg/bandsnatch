@@ -34,6 +34,11 @@ pub struct Item {
     /// Whether Bandcamp currently exposes this item as a preorder.
     #[serde(default)]
     pub is_preorder: bool,
+    /// When the fan bought this item, in Bandcamp's own format, e.g.
+    /// `04 Aug 2026 23:43:59 GMT`. Kept as text because a format change is a
+    /// missing date rather than a reason to reject the whole page.
+    #[serde(default)]
+    pub purchased: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

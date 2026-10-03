@@ -1,4 +1,5 @@
 use ::reqwest::IntoUrl;
+use chrono::NaiveDateTime;
 use governor::{Quota, RateLimiter};
 use http::header::CONTENT_DISPOSITION;
 use http::Method;
@@ -50,6 +51,23 @@ fn parse_tralbum_page(json: &str, url: &str) -> Result<TralbumPage, Box<dyn Erro
 pub struct CollectionDownload {
     pub url: String,
     pub is_preorder: bool,
+    /// When the fan bought this release, for ordering a run. `None` when
+    /// Bandcamp reports no date, or one this tool cannot read.
+    pub purchased: Option<NaiveDateTime>,
+}
+
+/// The format Bandcamp uses for a collection item's purchase time.
+const PURCHASED_FORMAT: &str = "%d %b %Y %H:%M:%S GMT";
+
+/// Read a purchase time, or `None` if Bandcamp changes the format.
+fn purchase_time(raw: &str) -> Option<NaiveDateTime> {
+    match NaiveDateTime::parse_from_str(raw, PURCHASED_FORMAT) {
+        Ok(time) => Some(time),
+        Err(e) => {
+            debug!("Failed to parse purchase time {raw:?}: {e}");
+            None
+        }
+    }
 }
 
 /// Body used to paginate through Bandcamp's collection API.
@@ -158,8 +176,7 @@ impl Api {
     ) -> Result<reqwest::Response, Box<dyn Error>> {
         self.ratelimiter.until_ready().block_on();
 
-        let response =
-            Self::build_request(&self.client, method.clone(), url, body).send()?;
+        let response = Self::build_request(&self.client, method.clone(), url, body).send()?;
         let status: http::StatusCode = response.status();
 
         if !status.is_success() {
@@ -204,6 +221,7 @@ impl Api {
                             CollectionDownload {
                                 url,
                                 is_preorder: item.is_preorder,
+                                purchased: item.purchased.as_deref().and_then(purchase_time),
                             },
                         )
                     })
@@ -582,7 +600,7 @@ impl Api {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_tralbum_page, safe_download_filename, Api};
+    use super::*;
     use http::Method;
     use std::path::PathBuf;
 
@@ -603,6 +621,18 @@ mod tests {
             .to_string();
 
         assert!(err.contains("byArtist"), "{err}");
+    }
+
+    #[test]
+    fn bandcamps_purchase_time_format_is_read() {
+        let time = purchase_time("04 Aug 2026 23:43:59 GMT").unwrap();
+
+        assert_eq!(time.to_string(), "2026-08-04 23:43:59");
+    }
+
+    #[test]
+    fn an_unreadable_purchase_time_is_not_a_date() {
+        assert!(purchase_time("2026-08-04T23:43:59Z").is_none());
     }
 
     /// The collection pagination POST used to reach Bandcamp without going
@@ -632,7 +662,9 @@ mod tests {
     /// attempt. Losing the body would make pagination fail on the second page.
     #[test]
     fn the_pagination_body_is_rebuildable_for_a_retry() {
-        let client = reqwest::blocking::Client::new();
+        // `super::*` brings in the parent's `reqwest` alias for the blocking
+        // module, so name the crate to reach the same module at the root.
+        let client = ::reqwest::blocking::Client::new();
         let body = serde_json::to_value(super::PostCollectionBody {
             fan_id: "1234",
             older_than_token: "abc",
