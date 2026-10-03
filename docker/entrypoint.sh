@@ -34,16 +34,6 @@ human_duration() {
 }
 
 # ---------------------------------------------------------------------------
-# Pass-through: a named subcommand or flag makes this a plain CLI wrapper, so
-# the schedule is skipped.
-# ---------------------------------------------------------------------------
-case "${1:-}" in
-    run | release | debug-collection | -h | --help | -V | --version)
-        exec "$BIN" "$@"
-        ;;
-esac
-
-# ---------------------------------------------------------------------------
 # Privilege dropping. With no PUID/PGID the container runs as root, which suits
 # a rootless/userns setup but not a NAS bind mount.
 # ---------------------------------------------------------------------------
@@ -93,6 +83,29 @@ prepare_dirs() {
 }
 
 # ---------------------------------------------------------------------------
+# Pass-through: a named subcommand or flag makes this a plain CLI wrapper, so
+# the schedule is skipped. Directories are prepared and privileges dropped the
+# same way as for a scheduled run, so `docker exec bandsnatch release <url>`
+# writes with the same ownership as the rest of the library.
+# ---------------------------------------------------------------------------
+run_as_user() {
+    if [ -n "$PUID" ] || [ -n "$PGID" ]; then
+        exec su-exec "${PUID:-0}:${PGID:-0}" "$BIN" "$@"
+    fi
+    exec "$BIN" "$@"
+}
+
+case "${1:-}" in
+    -h | --help | -V | --version)
+        exec "$BIN" "$@"
+        ;;
+    run | release | debug-collection)
+        prepare_dirs
+        run_as_user "$@"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Scheduling
 # ---------------------------------------------------------------------------
 : "${RUN_ONCE:=0}"
@@ -120,10 +133,7 @@ interruptible_sleep() {
 }
 
 run_sync() {
-    if [ -n "$PUID" ] || [ -n "$PGID" ]; then
-        exec su-exec "${PUID:-0}:${PGID:-0}" "$BIN" run ${EXTRA_ARGS:-}
-    fi
-    exec "$BIN" run ${EXTRA_ARGS:-}
+    run_as_user run ${EXTRA_ARGS:-}
 }
 
 # Seconds until the next occurrence of local-time hour RUN_AT, plus optional

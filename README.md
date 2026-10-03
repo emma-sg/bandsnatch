@@ -140,15 +140,22 @@ and rotate, so there is no cheaper stable signal to compare.
 
 ```
 bandsnatch release p1234 -c ./cookies.json -f flac -o ./Music --user you
+bandsnatch release 'https://cartierchain.bandcamp.com/album/humblewrap' -c ./cookies.json -f flac -o ./Music
 bandsnatch release 'https://bandcamp.com/download/...' -c ./cookies.json -o ./Music
 ```
 
 `release` ignores the recorded state for that one release: use it after an artist
-re-uploads a track, or when a pre-order ships. The target is either a collection
-sale-item key - the value inside the `[p1234]` suffix of each folder, so it is
-already visible in your library - or a full download page URL. A key needs
-`--user`, because keys can only be found by reading your collection listing; a
-URL does not.
+re-uploads a track, or when a pre-order ships. The target is one of:
+
+- an album or track page URL, which is looked up in your collection to find the
+  purchase behind it, and so needs `--user`;
+- a collection sale-item key - the value inside the `[p1234]` suffix of each
+  folder, so it is already visible in your library - which needs `--user` for the
+  same reason;
+- a full download page URL, which needs neither.
+
+An album page is matched on its title and artist, so a collection holding two
+releases under the same name needs the sale-item key instead.
 
 It honours the same `--album-path` and the same state database as `run`, so the
 release is recorded afterwards and no later run fetches it again.
@@ -187,13 +194,21 @@ package has to be public for an unauthenticated pull; if `docker pull` asks for
 credentials, set its visibility in the repository's package settings. On Unraid,
 the image goes in the template's Repository field.
 
-The container only supervises the same one-shot CLI, so one-off runs and
-on-demand re-downloads work without a second entry point:
+The container runs the same one-shot CLI, so one-off runs and on-demand
+re-downloads work without a second entry point. `docker exec` does not go
+through the image's entrypoint, so ask the supervisor for the work: that way
+`PUID`/`PGID`, the `BS_*` variables and the path preparation still apply.
 
 ```
 docker run --rm bandsnatch:local run --dry-run -f flac -o /music you
-docker exec bandsnatch release p1234
+docker exec bandsnatch /entrypoint.sh run --dry-run --limit 1
+docker exec bandsnatch /entrypoint.sh release 'https://cartierchain.bandcamp.com/album/humblewrap'
+docker exec bandsnatch /entrypoint.sh release p1234
 ```
+
+Running the binary directly instead - `docker exec bandsnatch bandsnatch release
+p1234` - skips all of that and downloads as root, which is usually not what a
+media share wants.
 
 | Variable | Purpose |
 | --- | --- |
