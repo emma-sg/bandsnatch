@@ -94,7 +94,9 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
     let from_listing = release_key.is_some();
     let id = release_key
         .or_else(|| item.item_id.map(|id| format!("p{id}")))
-        .ok_or("could not determine an identifier for this release; pass its sale-item key instead")?;
+        .ok_or(
+            "could not determine an identifier for this release; pass its sale-item key instead",
+        )?;
 
     // Without a collection listing there is no way to tell whether this is still
     // a preorder, so preserve whatever was recorded rather than guessing.

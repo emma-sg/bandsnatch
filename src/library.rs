@@ -207,13 +207,7 @@ mod tests {
         // it recursively. Every render must be an error or a folder strictly
         // below the root.
         let layout = AlbumPath::new("{artist}/{album} ({year})").unwrap();
-        for (artist, album) in [
-            ("", ""),
-            ("()", ""),
-            ("", "[]"),
-            ("{}", "{}"),
-            ("()", "()"),
-        ] {
+        for (artist, album) in [("", ""), ("()", ""), ("", "[]"), ("{}", "{}"), ("()", "()")] {
             let rendered = layout.render(&root(), artist, album, None, "p1");
             assert!(
                 rendered.is_err(),
@@ -223,7 +217,9 @@ mod tests {
 
         // A coarse template with an empty value is the same hazard.
         let coarse = AlbumPath::new("{artist}").unwrap();
-        assert!(coarse.render(&root(), "", "Some Album", None, "p1").is_err());
+        assert!(coarse
+            .render(&root(), "", "Some Album", None, "p1")
+            .is_err());
 
         // Any successful render is a strict descendant of the root.
         let rendered = layout

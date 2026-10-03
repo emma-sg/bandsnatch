@@ -138,7 +138,7 @@ impl Api {
         self.ratelimiter.until_ready().block_on();
 
         let response =
-            Self::build_request(&self.client, method.clone(), url.clone(), body).send()?;
+            Self::build_request(&self.client, method.clone(), url, body).send()?;
         let status: http::StatusCode = response.status();
 
         if !status.is_success() {
@@ -322,7 +322,9 @@ impl Api {
                 older_than_token: &last_token,
             })?;
             let url = Self::bc_path(&format!("api/fancollection/1/{collection_name}"));
-            let body = self.post_json(&url, &body)?.json::<ParsedCollectionItems>()?;
+            let body = self
+                .post_json(&url, &body)?
+                .json::<ParsedCollectionItems>()?;
 
             let items = body.items.iter().by_ref().collect::<Vec<_>>();
             let redownload_urls =
@@ -355,7 +357,9 @@ impl Api {
             format!("could not find the `pagedata` element for digital item {url}")
         })?;
         let download_page_blob = blob_element.get("data-blob").ok_or_else(|| {
-            format!("could not extract `data-blob` from the pagedata element for digital item {url}")
+            format!(
+                "could not extract `data-blob` from the pagedata element for digital item {url}"
+            )
         })?;
 
         let parsed = match serde_json::from_str::<ParsedItemsData>(&download_page_blob) {
@@ -460,13 +464,11 @@ impl Api {
 
         let Some(disposition) = res.headers().get(CONTENT_DISPOSITION) else {
             pb.finish_and_clear();
-            return Err(
-                format!(
-                    "could not download {full_title} when using url `{}`",
-                    download.url
-                )
-                .into(),
-            );
+            return Err(format!(
+                "could not download {full_title} when using url `{}`",
+                download.url
+            )
+            .into());
         };
 
         // `HeaderValue::to_str` only handles valid ASCII bytes, and Bandcamp
@@ -578,12 +580,19 @@ mod tests {
 
         // Twice, because a retry sends the same body rather than an empty one.
         for _ in 0..2 {
-            let request =
-                Api::build_request(&client, Method::POST, "https://example.invalid/x", Some(&body))
-                    .build()
-                    .unwrap();
+            let request = Api::build_request(
+                &client,
+                Method::POST,
+                "https://example.invalid/x",
+                Some(&body),
+            )
+            .build()
+            .unwrap();
             let sent = request.body().and_then(|b| b.as_bytes()).unwrap();
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(sent).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(sent).unwrap(),
+                expected
+            );
         }
 
         // A bodyless request must stay bodyless rather than inheriting one.
