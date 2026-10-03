@@ -13,6 +13,26 @@ log() {
     printf '%s %s\n' "$(date -Iseconds)" "$*"
 }
 
+# Local time for an epoch, e.g. 2026-10-03T03:00:12+01:00.
+at_epoch() {
+    date -Iseconds -d "@$1"
+}
+
+# The same seconds as "12s", "4m32s" or "1h02m03s".
+human_duration() {
+    seconds=$1
+    hours=$((seconds / 3600))
+    minutes=$(((seconds % 3600) / 60))
+    seconds=$((seconds % 60))
+    if [ "$hours" -gt 0 ]; then
+        printf '%sh%02dm%02ds' "$hours" "$minutes" "$seconds"
+    elif [ "$minutes" -gt 0 ]; then
+        printf '%sm%02ds' "$minutes" "$seconds"
+    else
+        printf '%ss' "$seconds"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Pass-through: a named subcommand or flag makes this a plain CLI wrapper, so
 # the schedule is skipped.
@@ -125,13 +145,39 @@ seconds_until_hour() {
     printf '%s' "$delta"
 }
 
-next_delay() {
+# Accept "3" or "03"; anything else is a mistake worth stopping for before the
+# first run rather than after it.
+validate_schedule() {
     if [ -n "$RUN_AT" ]; then
-        # Accept "3" or "03"; reject anything outside 0-23 early.
-        if [ "$(10#$RUN_AT)" -lt 0 ] || [ "$(10#$RUN_AT)" -gt 23 ]; then
+        case "$RUN_AT" in
+            *[!0-9]*)
+                log "RUN_AT must be an hour between 0 and 23 (got '$RUN_AT')"
+                exit 1
+                ;;
+        esac
+        if [ "$RUN_AT" -gt 23 ]; then
             log "RUN_AT must be an hour between 0 and 23 (got '$RUN_AT')"
             exit 1
         fi
+    fi
+}
+
+describe_schedule() {
+    if [ -n "$RUN_AT" ]; then
+        # 10# reads the hour as base 10, so "08" is not taken as octal.
+        hour=$((10#$RUN_AT))
+        if [ -n "$JITTER" ]; then
+            printf 'daily at %02d:00 local time, with up to %s seconds of jitter' "$hour" "$JITTER"
+        else
+            printf 'daily at %02d:00 local time' "$hour"
+        fi
+    else
+        printf 'every %s seconds' "$INTERVAL"
+    fi
+}
+
+next_delay() {
+    if [ -n "$RUN_AT" ]; then
         seconds_until_hour "$RUN_AT"
     else
         printf '%s' "$INTERVAL"
@@ -139,8 +185,16 @@ next_delay() {
 }
 
 prepare_dirs
+validate_schedule
+
+if [ "$RUN_ONCE" = "1" ]; then
+    log "schedule: RUN_ONCE=1, one run and then exit"
+else
+    log "schedule: $(describe_schedule)"
+fi
 
 while :; do
+    started=$(date +%s)
     log "run starting: $(drop_privs "$BIN" --version 2>/dev/null || echo bandsnatch) against ${BS_OUTPUT_FOLDER:-/music}"
 
     # BS_* variables are read by clap directly; EXTRA_ARGS carries flags with no
@@ -150,16 +204,17 @@ while :; do
     status=0
     wait "$run_pid" || status=$?
     run_pid=
+    elapsed=$(human_duration $(( $(date +%s) - started )))
 
     if [ "$shutdown" = "1" ]; then
-        log "interrupted during a run (status $status)"
+        log "interrupted during a run after $elapsed (status $status)"
         break
     fi
     if [ "$status" = "0" ]; then
-        log "run finished cleanly"
+        log "run finished cleanly in $elapsed"
     else
         # A failed sync must not kill the container; the next tick retries.
-        log "run failed with exit status $status"
+        log "run failed after $elapsed with exit status $status"
     fi
 
     if [ "$RUN_ONCE" = "1" ]; then
@@ -168,7 +223,7 @@ while :; do
     fi
 
     delay=$(next_delay)
-    log "sleeping for ${delay}s"
+    log "next run at $(at_epoch $(( $(date +%s) + delay ))) (waiting ${delay}s)"
     interruptible_sleep "$delay" || true
 
     if [ "$shutdown" = "1" ]; then

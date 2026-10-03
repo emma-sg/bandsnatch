@@ -201,12 +201,33 @@ docker exec bandsnatch release p1234
 | `RUN_AT` | Local hour (0-23) to run at, daily. |
 | `INTERVAL` | Seconds between runs, used when `RUN_AT` is unset. Defaults to `86400`. |
 | `JITTER` | Extra random seconds added to the delay, so many containers do not all hit Bandcamp on the hour. |
+| `TZ` | Timezone for `RUN_AT` and for log timestamps, e.g. `Europe/London`. The container uses UTC when this is not set. |
 | `PUID` / `PGID` | Run downloads as these ids, matching the owner of your media share. |
 | `CHOWN_RECURSIVE` | `1` takes ownership of every file in the output folder. Off by default because it is slow on a large library. |
 | `EXTRA_ARGS` | Extra CLI flags, for anything that has no `BS_` environment variable, e.g. `--recheck-after 7`. |
 
 Every `BS_*` variable maps to the CLI flag of the same name. A failed run is
 retried at the next tick rather than stopping the container.
+
+The supervisor logs the schedule when it starts and the time of the next run
+after each run, and each run reports what it did:
+
+```
+2026-10-02T22:31:19-04:00 schedule: daily at 03:00 local time, with up to 60 seconds of jitter
+2026-10-02T22:31:19-04:00 run starting: bandsnatch 0.4.0 against /music
+[2026-10-02T22:31:19-04:00 INFO  bandsnatch] State: /config/state.db (325 releases recorded)
+Processing 325 releases (325 to download, 0 to re-check, 0 up to date)
+[2026-10-02T22:31:22-04:00 INFO  bandsnatch] Downloading p210337533, Dovelace - Cali Cartier
+[2026-10-02T22:31:52-04:00 INFO  bandsnatch] Downloaded p210337533, Dovelace - Cali Cartier (30.3 MB)
+...
+Run summary: 325 downloaded, 0 re-downloaded, 0 unchanged, 0 skipped, 0 failed
+2026-10-02T23:14:02-04:00 run finished cleanly in 42m43s
+2026-10-02T23:14:02-04:00 next run at 2026-10-03T03:00:12-04:00 (waiting 13570s)
+```
+
+The `State:` line is worth a look on the first run: it names the state
+database and how many releases it already has. A fresh database means the run
+will download your whole collection.
 
 ### Unraid
 
