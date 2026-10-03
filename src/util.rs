@@ -58,8 +58,7 @@ pub fn make_string_fs_safe(s: &str) -> String {
 pub fn display_safe(s: &str) -> String {
     s.chars()
         .filter(|c| {
-            !c.is_control()
-                && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         })
         .collect()
 }
@@ -69,14 +68,14 @@ const DEFAULT_BUF_SIZE: usize = 8192;
 
 // `std::io::copy` slightly modified to update a progress bar as it copies
 // https://doc.rust-lang.org/1.8.0/src/std/up/src/libstd/io/util.rs.html#46-61
-pub fn copy_with_progress<R: ?Sized, W: ?Sized>(
+pub fn copy_with_progress<R, W>(
     reader: &mut R,
     writer: &mut W,
     pb: &indicatif::ProgressBar,
 ) -> io::Result<u64>
 where
-    R: Read,
-    W: Write,
+    R: Read + ?Sized,
+    W: Write + ?Sized,
 {
     let mut buf = [0; DEFAULT_BUF_SIZE];
     let mut written = 0;
@@ -195,7 +194,10 @@ mod tests {
         assert_eq!(display_safe("Album\u{202e}gnp.txt"), "Albumgnp.txt");
         assert_eq!(display_safe("Album\u{2066}x\u{2069}"), "Albumx");
         // Ordinary text is untouched, including characters outside ASCII.
-        assert_eq!(display_safe("Björk – Utopía (2022)"), "Björk – Utopía (2022)");
+        assert_eq!(
+            display_safe("Björk – Utopía (2022)"),
+            "Björk – Utopía (2022)"
+        );
     }
 
     #[test]

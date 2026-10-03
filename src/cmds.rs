@@ -10,12 +10,7 @@ use crate::{
     state::{self, State},
 };
 use clap::Args as ClapArgs;
-use std::{
-    error::Error,
-    fs,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{error::Error, fs, path::PathBuf, sync::Arc};
 
 /// Audio formats Bandcamp offers, in the order presented to the user.
 /// Shared so `run` and `release` always match.
@@ -146,6 +141,17 @@ impl CommonArgs {
                 "Imported {imported} entries from the legacy `{}` cache; it is no longer read.",
                 state::LEGACY_CACHE_FILENAME
             );
+        }
+
+        // The count shows at a glance whether this run recognises the releases
+        // already on disk.
+        match state.len() {
+            Ok(count) => info!(
+                "State: {} ({} releases recorded)",
+                state_path.display(),
+                count
+            ),
+            Err(e) => debug!("could not count the state database: {e}"),
         }
 
         let cookies_file = self

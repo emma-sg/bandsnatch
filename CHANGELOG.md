@@ -27,6 +27,13 @@ and this project adheres to
   the same library.
 - Publish the container image to GHCR. Pushes to `main` build amd64, version
   tags build amd64 and arm64, and both tag the image for pulling on a NAS.
+- Log the schedule when the supervisor starts, and the time of the next run
+  after each run, along with how long the run took. Document `TZ`, which
+  `RUN_AT` and the log timestamps are read in.
+- Log which state database a run is using and how many releases it has
+  recorded, and log each release as it starts and when it finishes, with the
+  size of the download. Each run then ends with a count of releases downloaded,
+  re-downloaded, unchanged, skipped and failed.
 
 ### Changed
 
@@ -35,6 +42,11 @@ and this project adheres to
   Re-downloading a release replaces its folder in place instead of leaving a
   second ID-suffixed folder beside it.
 - `--force` ignores all recorded state rather than only the cache file.
+- Print log timestamps in local time, so they match the container supervisor's
+  lines and the hour `RUN_AT` is given in.
+- Check `RUN_AT` before the first run rather than after it, and say that a
+  release whose download information could not be read will be retried, instead
+  of reporting it as skipped.
 
 ### Fixed
 
@@ -57,6 +69,7 @@ and this project adheres to
   reject out-of-range `--recheck-after` values, which either made every release
   due on every run or panicked.
 - List a re-download only after it succeeds, not when it is attempted.
+- A failed write to the log no longer takes the run down.
 - Sanitise artist and album names in `--dry-run` output, as every other output
   path already did.
 - Forward SIGTERM to the running sync in the container. Without it, `docker stop`

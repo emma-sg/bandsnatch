@@ -13,6 +13,7 @@ extern crate simple_error;
 
 use clap::{Parser, Subcommand};
 use env_logger::{Env, DEFAULT_FILTER_ENV};
+use std::io::Write;
 
 #[derive(Parser, Debug)]
 #[clap(name = "bandsnatch", version, about, long_about = None)]
@@ -32,10 +33,22 @@ enum Commands {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: custom format
     // TODO: make default based on what release target
     let env = Env::default().filter_or(DEFAULT_FILTER_ENV, "bandsnatch=info");
-    env_logger::init_from_env(env);
+    // Timestamps are local, so they line up with the container supervisor's
+    // log lines and with the hour you configure `RUN_AT` in.
+    env_logger::Builder::from_env(env)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {:<5} {}] {}",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .init();
 
     let args = Args::parse();
 

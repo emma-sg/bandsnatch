@@ -203,7 +203,12 @@ pub struct RecheckPolicy {
 }
 
 impl RecheckPolicy {
-    pub fn decide(&self, entry: Option<&StateEntry>, is_preorder: bool, now: DateTime<Utc>) -> Action {
+    pub fn decide(
+        &self,
+        entry: Option<&StateEntry>,
+        is_preorder: bool,
+        now: DateTime<Utc>,
+    ) -> Action {
         if self.force {
             return Action::Download;
         }
@@ -297,9 +302,11 @@ impl State {
     /// again would deadlock.
     fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, Box<dyn Error>> {
         Ok(conn
-            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
             .optional()?)
     }
 
@@ -312,9 +319,9 @@ impl State {
         Ok(())
     }
 
-    /// Row count, used by tests to assert that imports and upserts do not
-    /// duplicate releases.
-    #[cfg(test)]
+    /// Row count, for the log line that reports which state store a run is
+    /// using, and for tests asserting that imports and upserts do not duplicate
+    /// releases.
     pub fn len(&self) -> Result<i64, Box<dyn Error>> {
         let conn = self.conn()?;
         Ok(conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?)
@@ -698,7 +705,10 @@ mod tests {
         );
         state.upsert(&updated).unwrap();
         assert_eq!(state.len().unwrap(), 1);
-        assert_eq!(state.get("p1234").unwrap().unwrap().size_mb.as_deref(), Some("700.00"));
+        assert_eq!(
+            state.get("p1234").unwrap().unwrap().size_mb.as_deref(),
+            Some("700.00")
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }

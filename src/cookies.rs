@@ -45,7 +45,7 @@ fn get_text_cookies(content: &str) -> Vec<RawCookie> {
                 host.push_str(columns[0]);
 
                 vec.push(RawCookie {
-                    host: host,
+                    host,
                     name: String::from(columns[5]),
                     content: String::from(columns[6]),
                 })

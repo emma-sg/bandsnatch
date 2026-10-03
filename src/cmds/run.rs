@@ -11,7 +11,10 @@ use indicatif::MultiProgress;
 use std::{
     collections::VecDeque,
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 /// Shared handle to the state store. `State` serialises access internally, so
@@ -102,9 +105,9 @@ fn record_unavailable(state: &SharedState, id: &str, description: &str, is_preor
     let record = StateEntry::unavailable(id, description, is_preorder, Utc::now());
     match state.record_unavailable(&record) {
         Ok(true) => (),
-        Ok(false) => debug!(
-            "not recording {id} as unavailable: it is already recorded as downloaded"
-        ),
+        Ok(false) => {
+            debug!("not recording {id} as unavailable: it is already recorded as downloaded")
+        }
         Err(e) => warn!("failed to record state for {id}: {e}"),
     }
 }
@@ -204,6 +207,14 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let api = context.api.clone();
     let album_path = context.album_path.clone();
 
+    // Counted for the summary at the end of the run. Relaxed ordering is
+    // enough: the values are only read after every worker has joined.
+    let downloaded = AtomicUsize::new(0);
+    let re_downloaded = AtomicUsize::new(0);
+    let unchanged = AtomicUsize::new(0);
+    let skipped = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+
     thread::scope(|scope| {
         for i in 0..jobs {
             let api = api.clone();
@@ -214,6 +225,11 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let album_path = album_path.clone();
             let dry_run_results = dry_run_results.clone();
             let updated = updated.clone();
+            let downloaded = &downloaded;
+            let re_downloaded = &re_downloaded;
+            let unchanged = &unchanged;
+            let skipped = &skipped;
+            let failed = &failed;
 
             // somehow re-create thread if it panics
             scope.spawn(move |_| {
@@ -238,18 +254,23 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     let item = match api.get_digital_item(&download.url, &debug) {
                         Ok(Some(item)) => item,
                         Ok(None) => {
-                            warn!("Could not find digital item for {id}");
+                            // Nothing to retry: Bandcamp has no digital item for
+                            // this purchase.
+                            warn!("Skipping {id}, Bandcamp has no digital item for it");
+                            skipped.fetch_add(1, Ordering::Relaxed);
                             record_unavailable(&state, &id, "UNKNOWN", download.is_preorder);
                             continue;
                         }
                         Err(e) => {
-                            warn!("Failed to read release info for {id}: {e}; skipped.");
+                            warn!("Failed to read release info for {id}: {e}; will retry next run");
+                            failed.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
                     };
 
                     if item.downloads.is_none() {
                         warn!("Skipping {id}, does not have any downloads");
+                        skipped.fetch_add(1, Ordering::Relaxed);
                         record_unavailable(&state, &id, "No downloads", download.is_preorder);
                         continue;
                     }
@@ -262,10 +283,12 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         let Some(changed) =
                             recheck_needed(&state, &id, advertised.as_deref(), !dry_run)
                         else {
+                            failed.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
                         if !changed {
                             m.suspend(|| debug!("{id} unchanged"));
+                            unchanged.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
                         m.suspend(|| {
@@ -288,13 +311,13 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
 
-                    m.println(format!(
-                        "Trying {id}, {} - {} ({:?})",
-                        util::display_safe(&item.title),
-                        util::display_safe(&item.artist),
-                        item.is_single(),
-                    ))
-                    .unwrap();
+                    m.suspend(|| {
+                        info!(
+                            "Downloading {id}, {} - {}",
+                            util::display_safe(&item.title),
+                            util::display_safe(&item.artist)
+                        )
+                    });
 
                     // A layout that cannot produce a safe folder is a per-release
                     // problem, so skip that release rather than abandoning the run.
@@ -308,31 +331,41 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         Ok(path) => path,
                         Err(e) => {
                             warn!("Skipping {id}, cannot build a destination path: {e}");
+                            skipped.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
                     };
 
-                    let content_length = match api.download_item(&item, &path, &id, &audio_format, &m)
-                    {
-                        Ok(len) => len,
-                        Err(e) => {
-                            // A failed download is not recorded, so the next run
-                            // retries it.
-                            warn!("Failed to download {id}: {e}; skipped.");
-                            continue;
-                        }
-                    };
+                    let content_length =
+                        match api.download_item(&item, &path, &id, &audio_format, &m) {
+                            Ok(len) => len,
+                            Err(e) => {
+                                // A failed download is not recorded, so the next run
+                                // retries it.
+                                warn!("Failed to download {id}: {e}; will retry next run");
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        };
+
+                    let finished = format!(
+                        "{id}, {} - {} ({:.1} MB)",
+                        util::display_safe(&item.title),
+                        util::display_safe(&item.artist),
+                        content_length as f64 / 1_048_576.0
+                    );
 
                     // Recorded only now: a re-download that failed must not be
                     // reported as having been updated.
                     if action == Action::Recheck {
+                        re_downloaded.fetch_add(1, Ordering::Relaxed);
+                        m.suspend(|| info!("Re-downloaded {finished}"));
                         if let Ok(mut list) = updated.lock() {
-                            list.push(format!(
-                                "{id}, {} - {}",
-                                util::display_safe(&item.title),
-                                util::display_safe(&item.artist)
-                            ));
+                            list.push(finished);
                         }
+                    } else {
+                        downloaded.fetch_add(1, Ordering::Relaxed);
+                        m.suspend(|| info!("Downloaded {finished}"));
                     }
 
                     let record = StateEntry::downloaded(
@@ -372,7 +405,14 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("Finished!");
+    println!(
+        "Run summary: {} downloaded, {} re-downloaded, {} unchanged, {} skipped, {} failed",
+        downloaded.load(Ordering::Relaxed),
+        re_downloaded.load(Ordering::Relaxed),
+        unchanged.load(Ordering::Relaxed),
+        skipped.load(Ordering::Relaxed),
+        failed.load(Ordering::Relaxed),
+    );
 
     Ok(())
 }
