@@ -41,7 +41,9 @@ struct PostCollectionBody<'a> {
 const MAX_RETRIES: u8 = 5;
 
 pub struct Api {
-    pub client: reqwest::Client,
+    /// Private so nothing can reach past the rate limiter and the retry path:
+    /// every request goes through `request` or `post_json`.
+    client: reqwest::Client,
     ratelimiter: governor::DefaultDirectRateLimiter,
 }
 
@@ -97,18 +99,46 @@ impl Api {
         method: Method,
         url: U,
     ) -> Result<reqwest::Response, Box<dyn Error>> {
-        self.request_with_retry(method, url, 0)
+        self.request_with_retry(method, url, None, 0)
+    }
+
+    /// POST a JSON body, waiting for the rate limiter and retrying on 429.
+    fn post_json<U: IntoUrl + Copy>(
+        &self,
+        url: U,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, Box<dyn Error>> {
+        self.request_with_retry(Method::POST, url, Some(body), 0)
+    }
+
+    /// One attempt at a request, with the JSON body attached if there is one.
+    ///
+    /// Built per attempt rather than once, because a retry has to send the body
+    /// again: a request builder cannot be reused once it has been sent.
+    fn build_request<U: IntoUrl>(
+        client: &reqwest::Client,
+        method: Method,
+        url: U,
+        body: Option<&serde_json::Value>,
+    ) -> reqwest::RequestBuilder {
+        let mut request = client.request(method, url);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        request
     }
 
     fn request_with_retry<U: IntoUrl + Copy>(
         &self,
         method: Method,
         url: U,
+        body: Option<&serde_json::Value>,
         retry_attempt: u8,
     ) -> Result<reqwest::Response, Box<dyn Error>> {
         self.ratelimiter.until_ready().block_on();
 
-        let response = self.client.request(method.clone(), url.clone()).send()?;
+        let response =
+            Self::build_request(&self.client, method.clone(), url.clone(), body).send()?;
         let status: http::StatusCode = response.status();
 
         if !status.is_success() {
@@ -125,7 +155,7 @@ impl Api {
 
             warn!("hit ratelimit from Bandcamp, sleeping for 10 seconds");
             std::thread::sleep(std::time::Duration::from_secs(10));
-            return self.request_with_retry(method, url, retry_attempt + 1);
+            return self.request_with_retry(method, url, body, retry_attempt + 1);
         }
 
         Ok(response)
@@ -287,19 +317,12 @@ impl Api {
 
         while more_available {
             trace!("More items to collect, looping...");
-            // retries
-            let body = PostCollectionBody {
+            let body = serde_json::to_value(PostCollectionBody {
                 fan_id: &data.fan_data.fan_id,
                 older_than_token: &last_token,
-            };
-            let body = self
-                .client
-                .post(&Self::bc_path(&format!(
-                    "api/fancollection/1/{collection_name}"
-                )))
-                .json(&body)
-                .send()?
-                .json::<ParsedCollectionItems>()?;
+            })?;
+            let url = Self::bc_path(&format!("api/fancollection/1/{collection_name}"));
+            let body = self.post_json(&url, &body)?.json::<ParsedCollectionItems>()?;
 
             let items = body.items.iter().by_ref().collect::<Vec<_>>();
             let redownload_urls =
@@ -514,8 +537,61 @@ impl Api {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_download_filename;
+    use super::{safe_download_filename, Api};
+    use http::Method;
     use std::path::PathBuf;
+
+    /// The collection pagination POST used to reach Bandcamp without going
+    /// through the limiter, so a large collection could page as fast as the
+    /// network allowed.
+    #[test]
+    fn post_json_waits_for_the_rate_limiter() {
+        let api = Api::new(Vec::new());
+        let body = serde_json::json!({});
+
+        // The quota is three per second, so the fourth call cannot start until a
+        // token comes back. The request itself fails against a closed port and
+        // only the wait is under test: the limiter is the only thing that can
+        // produce one, and the request path used to skip it.
+        let start = std::time::Instant::now();
+        for _ in 0..4 {
+            let _ = api.post_json("http://127.0.0.1:1/", &body);
+        }
+        let waited = start.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(250),
+            "four POSTs went out in {waited:?}, so the rate limiter was skipped"
+        );
+    }
+
+    /// A retried request has to send its body again, so the request is built per
+    /// attempt. Losing the body would make pagination fail on the second page.
+    #[test]
+    fn the_pagination_body_is_rebuildable_for_a_retry() {
+        let client = reqwest::blocking::Client::new();
+        let body = serde_json::to_value(super::PostCollectionBody {
+            fan_id: "1234",
+            older_than_token: "abc",
+        })
+        .unwrap();
+        let expected = serde_json::json!({ "fan_id": "1234", "older_than_token": "abc" });
+
+        // Twice, because a retry sends the same body rather than an empty one.
+        for _ in 0..2 {
+            let request =
+                Api::build_request(&client, Method::POST, "https://example.invalid/x", Some(&body))
+                    .build()
+                    .unwrap();
+            let sent = request.body().and_then(|b| b.as_bytes()).unwrap();
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(sent).unwrap(), expected);
+        }
+
+        // A bodyless request must stay bodyless rather than inheriting one.
+        let request = Api::build_request(&client, Method::GET, "https://example.invalid/x", None)
+            .build()
+            .unwrap();
+        assert!(request.body().is_none());
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
