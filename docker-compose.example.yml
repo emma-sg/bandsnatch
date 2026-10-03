@@ -1,0 +1,36 @@
+services:
+  bandsnatch:
+    build: .
+    # image: ghcr.io/emma-sg/bandsnatch:latest
+    container_name: bandsnatch
+    restart: unless-stopped
+    environment:
+      TZ: Europe/London
+      # Match to `id -u` / `id -g` on the host so the media server's user owns
+      # the downloaded files. Omit both to run as root.
+      PUID: "1000"
+      PGID: "1000"
+      # Required: your Bandcamp username, not your display name.
+      BS_USER: your-bandcamp-username
+      BS_COOKIES: /config/cookies.txt
+      BS_FORMAT: flac
+      BS_OUTPUT_FOLDER: /music
+      # Keep the state database on fast storage with the config. A media share
+      # would write to it on every run.
+      BS_STATE: /config/state.db
+      # Daily at 03:00 local, with up to 30 minutes of jitter.
+      RUN_AT: "3"
+      JITTER: "1800"
+      # Re-check a release for an in-place update a week after its last check,
+      # re-downloading only changed ones. 0 disables the sweep.
+      EXTRA_ARGS: --recheck-after 7
+      # Set to 1 to run once and exit (also makes this a valid K8s CronJob).
+      RUN_ONCE: "0"
+      # Only needed when the library is owned by the wrong user. It takes
+      # ownership of every file, which can be slow on a large library.
+      CHOWN_RECURSIVE: "0"
+    volumes:
+      # Read-write: it holds the cookies and the state database. Restrict the
+      # cookies file itself with chmod 600 on the host.
+      - ./appdata:/config
+      - /path/to/music:/music
