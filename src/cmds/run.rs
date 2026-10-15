@@ -152,9 +152,12 @@ pub struct Args {
     #[arg(short = 'n', long, env = "BS_LIMIT")]
     limit: Option<usize>,
 
-    /// Name of the user to download releases from (must be logged in through cookies).
+    /// Bandcamp username to read the collection of.
+    ///
+    /// Detected from your authentication cookies when this is not given, which
+    /// needs cookies for a logged-in account with a fan profile.
     #[arg(env = "BS_USER")]
-    user: String,
+    user: Option<String>,
 }
 
 /// Record that Bandcamp has no usable download for a purchase.
@@ -196,6 +199,17 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let limit = limit.unwrap_or(usize::MAX);
     let debug = common.debug;
     let dry_run = common.dry_run;
+
+    // The cookies name the logged-in account, so a username is only needed when
+    // neither the argument nor `BS_USER` supplies one.
+    let user = match user {
+        Some(user) => user,
+        None => {
+            let detected = context.api.get_current_username()?;
+            info!("Detected Bandcamp user: {detected}");
+            detected
+        }
+    };
 
     // `--recheck-all` makes every release due for a comparison now; `--force`
     // downloads everything without comparing.

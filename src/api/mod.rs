@@ -245,6 +245,47 @@ impl Api {
         Ok(response)
     }
 
+    /// Discover the username of the account the current cookies belong to.
+    ///
+    /// Used when a run was given no username. The collection to read is the one
+    /// belonging to the account the cookies log in as.
+    pub fn get_current_username(&self) -> Result<String, Box<dyn Error>> {
+        let body = self.request(Method::GET, &Self::bc_path(""))?.text()?;
+        Self::username_from_homepage(&body)
+    }
+
+    /// Read the logged-in username out of the homepage's data blob.
+    ///
+    /// Every failure here is an error rather than a fallback, because reading
+    /// the wrong collection is worse than not running.
+    fn username_from_homepage(body: &str) -> Result<String, Box<dyn Error>> {
+        let soup = Soup::new(body);
+        let element = soup.attr("id", "HomepageApp").find().ok_or(
+            "could not find the homepage identity element; Bandcamp may have changed its markup, so pass the username explicitly",
+        )?;
+        let blob = element
+            .get("data-blob")
+            .ok_or("could not read the homepage identity blob; pass the username explicitly")?;
+        let data: HomepageData = serde_json::from_str(&blob).map_err(|e| {
+            format!("could not parse the homepage identity blob: {e}; pass the username explicitly")
+        })?;
+
+        if !data.page_context.identity.is_logged_in {
+            bail!(
+                "the cookies do not log in to a Bandcamp account; log in and export fresh cookies, or pass the username explicitly"
+            );
+        }
+
+        match data.page_context.identity.fan_username {
+            Some(username) if !username.trim().is_empty() => Ok(username),
+            _ => {
+                bail!(
+                    "the logged-in account has no fan username, so there is no collection to read; pass the username explicitly"
+                );
+            }
+        }
+    }
+
     /// Filters the download map by optional artist or album filters.
     fn filter_download_map(
         unfiltered: Option<DownloadsMap>,
@@ -904,6 +945,59 @@ mod tests {
 
             assert_eq!(full, half * 2, "attempt {attempt}");
             assert!(full <= RATE_LIMIT_MAX.as_secs(), "attempt {attempt}");
+        }
+    }
+
+    #[test]
+    fn homepage_identity_reads_the_logged_in_fan_not_the_page_owner() {
+        let body = r#"
+            <div id="pagedata" data-blob="{&quot;cfg&quot;:{}}"></div>
+            <div id="HomepageApp" data-blob="{
+                &quot;pageContext&quot;:{
+                    &quot;identity&quot;:{
+                        &quot;isLoggedIn&quot;:true,
+                        &quot;fanUsername&quot;:&quot;listener&quot;
+                    }
+                },
+                &quot;pageFan&quot;:{&quot;pageFanUsername&quot;:&quot;someone-else&quot;}
+            }"></div>
+        "#;
+
+        assert_eq!(Api::username_from_homepage(body).unwrap(), "listener");
+    }
+
+    #[test]
+    fn homepage_identity_needs_a_logged_in_account_with_a_username() {
+        for identity in [
+            serde_json::json!({"isLoggedIn": false, "fanUsername": "stale-user"}),
+            serde_json::json!({"isLoggedIn": true, "fanUsername": null}),
+            serde_json::json!({"isLoggedIn": true}),
+            serde_json::json!({"isLoggedIn": true, "fanUsername": ""}),
+            serde_json::json!({"isLoggedIn": true, "fanUsername": " \t"}),
+        ] {
+            let data = serde_json::json!({"pageContext": {"identity": identity}});
+            let body = format!(r#"<div id="HomepageApp" data-blob='{data}'></div>"#);
+
+            assert!(
+                Api::username_from_homepage(&body).is_err(),
+                "accepted {identity}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_homepage_identity_is_an_error() {
+        for body in [
+            "<html><body>Log in</body></html>",
+            r#"<div id="HomepageApp"></div>"#,
+            r#"<div id="HomepageApp" data-blob="not JSON"></div>"#,
+            r#"<div id="HomepageApp" data-blob="{}"></div>"#,
+            r#"<div id="HomepageApp" data-blob='{"pageContext":{"identity":null}}'></div>"#,
+        ] {
+            assert!(
+                Api::username_from_homepage(body).is_err(),
+                "accepted {body}"
+            );
         }
     }
 }

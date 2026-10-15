@@ -26,10 +26,14 @@ project in general I'd love to hear them.
 
 ## Usage
 
-The most basic usage is along the lines of
-`bandsnatch run -f <format> <username>`, as it will try to automatically fetch
-cookies from a local `cookies.json`<!-- or from Firefox (TODO)-->. But if this
-fails you can provide the `-c` option with a path to a cookies file to use.
+The most basic usage is `bandsnatch run -f <format>`. Bandsnatch reads your
+username from your authentication cookies, which it tries to load from a local
+`cookies.json` or `cookies.txt`<!-- or from Firefox (TODO)-->. You can give it a
+cookies file to use instead with the `-c` option.
+
+To pick the collection yourself, run `bandsnatch run -f <format> <username>` or
+set `BS_USER`. Either one skips the detection. The collection you name still has
+to belong to the account your cookies log in as.
 
 For more advanced usage, you can run `bandsnatch run -h` to get output similar
 to the following.
@@ -37,10 +41,10 @@ to the following.
 ```
 Run Bandsnatch to download your collection
 
-Usage: bandsnatch run [OPTIONS] --format <AUDIO_FORMAT> <USER>
+Usage: bandsnatch run [OPTIONS] --format <AUDIO_FORMAT> [USER]
 
 Arguments:
-  <USER>  Name of the user to download releases from (must be logged in through cookies) [env: BS_USER=]
+  [USER]  Bandcamp username to read the collection of [env: BS_USER=]
 
 Options:
       --album <ALBUM>           [env: BS_ALBUM=]
@@ -72,10 +76,10 @@ collection to the folder you want.
 ### Example
 
 ```
-bandsnatch run -c ./cookies.json -f flac -o ./Music ovyerus
+bandsnatch run -c ./cookies.json -f flac -o ./Music
 ```
 
-This would download my entire music collection into a local "Music" folder, and
+This would download your entire music collection into a local "Music" folder, and
 also create a `.bandsnatch-state.db` SQLite database recording what was
 retrieved; later runs read it to skip releases that are already downloaded.
 
@@ -305,6 +309,12 @@ If you don't provide the `--cookies` option, Bandsnatch will attempt to
 automatically find a file named `cookies.json` or `cookies.txt` in the local
 directory and load it.
 
+Automatic detection needs cookies for a logged-in account that has a fan profile.
+If Bandcamp does not recognise the session, log in again and export fresh cookies,
+or pass the username explicitly. Passing one does not skip the check that the
+collection belongs to the account your cookies log in as. `debug-collection`
+still needs `--user`, because it inspects the profile you name rather than yours.
+
 These cookies are full session credentials: anything that can read the file can
 log in as you, including to make purchases. Keep it out of shared directories
 and backups, and set it to `0600` (`chmod 600 cookies.txt`). Bandsnatch reads
@@ -318,7 +328,7 @@ bandsnatch will try to automatically load the cookies from there if possible
 
 Binary builds of Bandsnatch are available on our
 [releases page](https://github.com/Ovyerus/bandsnatch/releases) for Windows, Mac
-(both ARM & Intel), and Linux (various architectures).
+(Apple Silicon), and Linux (x86_64).
 
 ### Nix flake
 
@@ -332,6 +342,24 @@ nix shell github:ovyerus/bandsnatch
 
 You can install it permanently with `nix profile install`, or by adding it to
 your NixOS/Home Manager configuration.
+
+The flake builds natively for Apple Silicon macOS and x86_64 Linux. Linux
+binaries link musl statically, so they need nothing from the host.
+macOS binaries link `libiconv` statically and nothing else beyond Apple's own
+libraries and frameworks.
+
+To build with the definition CI uses:
+
+```sh
+nix build -L
+./result/bin/bandsnatch --help
+```
+
+`nix develop` gives you Cargo, rustc, rustfmt and clippy from the same locked
+nixpkgs input as the package build, so `cargo run -- --help` works inside it. A
+development build links the host libc; `nix build` produces the static release
+binary. The Rust build lives in `package.nix`, and the flake no longer provides
+cross-compilation outputs.
 
 ### Homebrew
 

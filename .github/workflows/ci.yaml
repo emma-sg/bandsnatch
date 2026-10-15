@@ -11,17 +11,7 @@ on:
 
 jobs:
   build-linux:
-    strategy:
-      matrix:
-        platform:
-          - name: x86_64
-            target: amd64
-            runs-on: ubuntu-latest
-          - name: aarch64
-            target: arm64
-            runs-on: [self-hosted, linux, ARM64]
-
-    runs-on: ${{ matrix.platform.runs-on }}
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -34,28 +24,24 @@ jobs:
 
       - run: nix build
 
-      - name: Upload ${{ matrix.platform.name }}
+      - name: Verify standalone Linux binary
+        run: |
+          nix shell --inputs-from . 'nixpkgs#binutils-unwrapped^out' -c bash -euo pipefail <<'EOF'
+          binary=./result/bin/bandsnatch
+          headers="$(readelf -l "$binary")"
+          dynamic="$(readelf -d "$binary")"
+          if [[ "$headers" == *INTERP* || "$dynamic" == *"(NEEDED)"* ]]; then
+            echo "Linux release must not require a dynamic loader or shared libraries" >&2
+            exit 1
+          fi
+          "$binary" --version
+          "$binary" --help
+          EOF
+
+      - name: Upload x86_64
         uses: actions/upload-artifact@v4
         with:
-          name: bandsnatch-linux-${{ matrix.platform.name }}
-          path: ./result/bin/bandsnatch
-
-  build-macos-x86:
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: cachix/install-nix-action@v26
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - run: nix build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bandsnatch-macos-x86_64
+          name: bandsnatch-linux-x86_64
           path: ./result/bin/bandsnatch
 
   build-macos-arm:
@@ -70,6 +56,23 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: nix build
+
+      - name: Verify standalone macOS binary
+        run: |
+          binary=./result/bin/bandsnatch
+          dependencies="$(otool -L "$binary")"
+          printf '%s\n' "$dependencies"
+          while read -r library _; do
+            case "$library" in
+              "$binary":|/usr/lib/*|/System/Library/Frameworks/*) ;;
+              *)
+                echo "Unexpected macOS runtime dependency: $library" >&2
+                exit 1
+                ;;
+            esac
+          done <<< "$dependencies"
+          "$binary" --version
+          "$binary" --help
 
       - uses: actions/upload-artifact@v4
         with:
@@ -102,7 +105,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
       - build-linux
-      - build-macos-x86
       - build-macos-arm
       - build-windows
     steps:
@@ -115,10 +117,8 @@ jobs:
 
           declare -a arr=(
             "windows-x86_64"
-            "macos-x86_64"
             "macos-aarch64"
             "linux-x86_64"
-            "linux-aarch64"
           )
 
           for target in "${arr[@]}"
