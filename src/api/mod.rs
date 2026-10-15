@@ -55,6 +55,11 @@ pub struct CollectionDownload {
     /// When the fan bought this release, for ordering a run. `None` when
     /// Bandcamp reports no date, or one this tool cannot read.
     pub purchased: Option<NaiveDateTime>,
+    /// Tracks Bandcamp has audio for right now, as this run's listing reported
+    /// it. A pre-order reports the tracks published so far, so the count rises
+    /// as an artist adds more, and the listing a run already fetches carries it
+    /// for every purchase, so comparing it costs no request.
+    pub tracks: Option<u32>,
 }
 
 /// The format Bandcamp uses for a collection item's purchase time.
@@ -263,6 +268,7 @@ impl Api {
                                 url,
                                 is_preorder: item.is_preorder,
                                 purchased: item.purchased.as_deref().and_then(purchase_time),
+                                tracks: item.num_streamable_tracks,
                             },
                         )
                     })

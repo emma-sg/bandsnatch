@@ -233,7 +233,49 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             let entry = context.state.get(&id)?;
-            match policy.decide(entry.as_ref(), download.is_preorder, now) {
+
+            // A release whose track count moved has changed, and the listing
+            // this run already fetched reports the count, so no request is
+            // needed to notice. This is what catches the tracks an artist adds
+            // during a pre-order window, and a bonus track added to an album
+            // that was finished long ago.
+            if entry
+                .as_ref()
+                .is_some_and(|entry| state::track_count_changed(entry, download.tracks))
+            {
+                if let (Some(entry), Some(listed)) = (entry.as_ref(), download.tracks) {
+                    info!(
+                        "{id} now lists {listed} tracks, was {}; downloading",
+                        entry.tracks.unwrap_or_default()
+                    );
+                }
+                to_download += 1;
+                items.push(Work {
+                    id,
+                    download,
+                    action: Action::Download,
+                });
+                continue;
+            }
+
+            let action = policy.decide(entry.as_ref(), download.is_preorder, now);
+
+            // A release that is already downloaded or skipped, and whose row has
+            // no track count (one written before this was recorded, or imported
+            // from the legacy cache), takes the count the listing reports. A
+            // dry run leaves the database alone, as it does for the check
+            // timestamps.
+            if action != Action::Download && !dry_run {
+                if let (Some(entry), Some(listed)) = (entry.as_ref(), download.tracks) {
+                    if entry.tracks.is_none() {
+                        if let Err(e) = context.state.record_track_count(&id, listed) {
+                            warn!("failed to record the track count for {id}: {e}");
+                        }
+                    }
+                }
+            }
+
+            match action {
                 Action::Skip => up_to_date += 1,
                 Action::Download => {
                     to_download += 1;
@@ -467,6 +509,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         &audio_format,
                         advertised,
                         Some(content_length),
+                        download.tracks,
                         download.is_preorder,
                         Utc::now(),
                     );
@@ -563,6 +606,7 @@ mod tests {
             is_preorder: false,
             purchased: purchased
                 .map(|raw| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S").unwrap()),
+            tracks: None,
         }
     }
 

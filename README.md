@@ -127,18 +127,25 @@ to download them again; the `{id}` in the default layout keeps them separate.
 Bandcamp does not change a purchase ID when an artist replaces a release's
 audio, and a pre-order turns into a full download without the purchase changing
 either. For each release, Bandsnatch records the archive size Bandcamp advertises
-for the format you downloaded, alongside the number of bytes it transferred.
+for the format you downloaded, the number of tracks Bandcamp had audio for, and
+the number of bytes it transferred.
 
+- **A release that gained or lost tracks is downloaded again.** The collection
+  listing reports a track count for every purchase, and a run fetches that
+  listing anyway, so comparing it costs no request. This is what picks up the
+  tracks an artist adds during a pre-order window, and a bonus track added to an
+  album that was finished years ago.
 - **Pre-orders are re-checked automatically.** A release downloaded while
   Bandcamp still reported it as a pre-order is compared again until Bandcamp
-  stops saying pre-order, at which point the full release is fetched. That check
-  reads preorder status from the collection listing, which a run fetches anyway,
-  so waiting for a release costs nothing extra.
+  stops saying pre-order, at which point the full release is fetched. Preorder
+  status also comes from the listing, so waiting for a release costs nothing
+  extra either.
 - **`--preorder-after-minutes MINUTES`** (default 360) sets how long to wait
-  before comparing a release that is still a pre-order, so tracks added during
-  the pre-order window are picked up before the release date. This is separate
-  from the run interval on purpose: a run every fifteen minutes would otherwise
-  mean 96 requests a day for each pre-order. `0` compares on every run.
+  before comparing a release that is still a pre-order. That comparison reads
+  the advertised archive size, which notices a change the track count does not,
+  such as a track being replaced. It is separate from the run interval on
+  purpose: a run every fifteen minutes would otherwise mean 96 requests a day
+  for each pre-order. `0` compares on every run.
 - **`--preorder-checks N`** (default 50) caps how many pre-order comparisons one
   run makes. Releases are walked newest purchase first, so when more fall due
   than fit, the most recently bought are compared and the rest wait for the next
@@ -150,9 +157,14 @@ for the format you downloaded, alongside the number of bytes it transferred.
 - **`--recheck-all`** does the same for every release in one pass.
 - **`--force`** re-downloads everything unconditionally, without comparing.
 
-A re-check needs the release's download page to read the advertised size, so one
-request per due release is unavoidable: the URLs Bandcamp hands out are signed
-and rotate, so there is no cheaper stable signal to compare.
+The archive size can only be read from a release's download page, so that
+comparison costs one request per due release. It is the only way to notice
+content that changed without the track count moving.
+
+A library downloaded before the track count was recorded has none for any
+release. The first run after an upgrade fills them in from the listing as it
+walks the collection, and downloads nothing: there is nothing to compare them
+against yet, and re-downloading everything to find out would be a poor trade.
 
 ## Re-downloading a single release
 

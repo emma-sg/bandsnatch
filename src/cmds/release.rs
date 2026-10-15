@@ -61,7 +61,9 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
     // from. A direct download page URL needs no lookup at all.
     let is_url = target.starts_with("http://") || target.starts_with("https://");
     let is_page = target.contains("/album/") || target.contains("/track/");
-    let (release_key, page_url, listed_as_preorder) = if is_page {
+    // The last two come from the collection listing, so they are only known
+    // when the target had to be looked up in it.
+    let (release_key, page_url, listed_as_preorder, listed_tracks) = if is_page {
         let page = context.api.get_tralbum_page(&target)?;
         let user = user.as_deref().ok_or(
             "resolving an album or track page needs --user (or BS_USER); pass the sale-item key instead",
@@ -71,9 +73,14 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
             .get_download_urls(user, Some(&page.artist), Some(&page.title))?;
         let (key, download) = single_match(listing.download_urls, &page.title, &page.artist, user)?;
 
-        (Some(key), download.url, download.is_preorder)
+        (
+            Some(key),
+            download.url,
+            download.is_preorder,
+            download.tracks,
+        )
     } else if is_url {
-        (None, target.clone(), false)
+        (None, target.clone(), false, None)
     } else {
         let user = user.as_deref().ok_or(
             "resolving a sale-item key needs --user (or BS_USER); pass a full download URL instead",
@@ -87,6 +94,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
             Some(target.clone()),
             download.url.clone(),
             download.is_preorder,
+            download.tracks,
         )
     };
 
@@ -166,6 +174,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn Error>> {
         &audio_format,
         item.advertised_size(&audio_format),
         Some(content_length),
+        listed_tracks,
         is_preorder,
         Utc::now(),
     );
@@ -216,6 +225,7 @@ mod tests {
             url: url.to_owned(),
             is_preorder: false,
             purchased: None,
+            tracks: None,
         }
     }
 

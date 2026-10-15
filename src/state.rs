@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS items (
     state          TEXT NOT NULL,
     size_mb        TEXT,
     content_length INTEGER,
+    tracks         INTEGER,
     description    TEXT NOT NULL DEFAULT '',
     downloaded_at  TEXT,
     checked_at     TEXT
@@ -47,6 +48,28 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 ";
+
+/// Columns added after the first release, with the statement that adds each.
+///
+/// `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a database
+/// written by an earlier version needs its missing columns added separately.
+const ADDED_COLUMNS: &[(&str, &str)] = &[("tracks", "ALTER TABLE items ADD COLUMN tracks INTEGER")];
+
+/// Add any column an older database is missing.
+fn migrate(conn: &Connection) -> Result<(), Box<dyn Error>> {
+    let mut statement = conn.prepare("PRAGMA table_info(items)")?;
+    let existing = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+    drop(statement);
+
+    for (column, addition) in ADDED_COLUMNS {
+        if !existing.iter().any(|name| name == column) {
+            conn.execute(addition, [])?;
+        }
+    }
+    Ok(())
+}
 
 /// What is known about a purchase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +129,11 @@ pub struct StateEntry {
     /// `size_mb` drives change detection because it can be read without
     /// downloading.
     pub content_length: Option<i64>,
+    /// Tracks Bandcamp had audio for when this release was last downloaded, as
+    /// the collection listing reported it. An artist adding a track raises it,
+    /// and the listing a run already fetches carries the current count, so
+    /// noticing costs no request.
+    pub tracks: Option<u32>,
     pub description: String,
     pub downloaded_at: Option<String>,
     pub checked_at: Option<String>,
@@ -123,6 +151,7 @@ impl StateEntry {
         format: &str,
         size_mb: Option<String>,
         content_length: Option<u64>,
+        tracks: Option<u32>,
         is_preorder: bool,
         now: DateTime<Utc>,
     ) -> Self {
@@ -145,6 +174,7 @@ impl StateEntry {
             },
             size_mb,
             content_length: content_length.map(|len| len as i64),
+            tracks,
             description: match release_year {
                 Some(year) => format!("{display_title} ({year}) by {display_artist}"),
                 None => format!("{display_title} by {display_artist}"),
@@ -170,6 +200,7 @@ impl StateEntry {
             },
             size_mb: None,
             content_length: None,
+            tracks: None,
             description: description.to_string(),
             downloaded_at: None,
             checked_at: Some(now.to_rfc3339()),
@@ -302,6 +333,20 @@ pub fn fingerprint_changed(entry: &StateEntry, advertised_size_mb: Option<&str>)
     }
 }
 
+/// True when the collection listing reports a different number of tracks from
+/// the one recorded when this release was downloaded.
+///
+/// A count missing on either side means "cannot tell", for the same reason as
+/// the size comparison: a database written before this column existed must not
+/// look like a change, or the first run after an upgrade would re-download the
+/// whole library.
+pub fn track_count_changed(entry: &StateEntry, listed: Option<u32>) -> bool {
+    match (entry.tracks, listed) {
+        (Some(known), Some(current)) => known != current,
+        _ => false,
+    }
+}
+
 /// The SQLite state store.
 ///
 /// Access is serialised internally, so one `State` can be shared across the
@@ -332,6 +377,7 @@ impl State {
              PRAGMA busy_timeout = 10000;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -388,7 +434,7 @@ impl State {
         Ok(conn
             .query_row(
                 "SELECT id, artist, title, release_year, format, state, size_mb,
-                        content_length, description, downloaded_at, checked_at
+                        content_length, tracks, description, downloaded_at, checked_at
                  FROM items WHERE id = ?1",
                 params![id],
                 |row| {
@@ -405,9 +451,10 @@ impl State {
                         state: ItemState::parse(&raw_state).unwrap_or(ItemState::Skipped),
                         size_mb: row.get(6)?,
                         content_length: row.get(7)?,
-                        description: row.get(8)?,
-                        downloaded_at: row.get(9)?,
-                        checked_at: row.get(10)?,
+                        tracks: row.get(8)?,
+                        description: row.get(9)?,
+                        downloaded_at: row.get(10)?,
+                        checked_at: row.get(11)?,
                     })
                 },
             )
@@ -422,9 +469,9 @@ impl State {
     fn upsert_with(conn: &Connection, entry: &StateEntry) -> Result<(), Box<dyn Error>> {
         conn.execute(
             "INSERT INTO items (id, artist, title, release_year, format, state,
-                                size_mb, content_length, description,
+                                size_mb, content_length, tracks, description,
                                 downloaded_at, checked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 artist = excluded.artist,
                 title = excluded.title,
@@ -433,6 +480,7 @@ impl State {
                 state = excluded.state,
                 size_mb = excluded.size_mb,
                 content_length = excluded.content_length,
+                tracks = excluded.tracks,
                 description = excluded.description,
                 downloaded_at = excluded.downloaded_at,
                 checked_at = excluded.checked_at",
@@ -445,6 +493,7 @@ impl State {
                 entry.state.as_str(),
                 entry.size_mb,
                 entry.content_length,
+                entry.tracks,
                 entry.description,
                 entry.downloaded_at,
                 entry.checked_at,
@@ -482,6 +531,24 @@ impl State {
         conn.execute(
             "UPDATE items SET checked_at = ?2 WHERE id = ?1",
             params![id, now.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Record the track count the listing reports for a release that has none.
+    ///
+    /// A database written before this column existed has no count for anything,
+    /// so the first run after an upgrade fills them in as it walks the
+    /// collection. Nothing is downloaded: the count describes the library as it
+    /// stands, and there is nothing to compare it against yet.
+    ///
+    /// Only fills a missing value. A release that already has a count is left to
+    /// the download path, which records the count of the content it fetched.
+    pub fn record_track_count(&self, id: &str, tracks: u32) -> Result<(), Box<dyn Error>> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE items SET tracks = ?2 WHERE id = ?1 AND tracks IS NULL",
+            params![id, tracks],
         )?;
         Ok(())
     }
@@ -574,6 +641,7 @@ mod tests {
             state,
             size_mb: None,
             content_length: None,
+            tracks: None,
             description: String::new(),
             downloaded_at: None,
             checked_at: None,
@@ -716,6 +784,83 @@ mod tests {
     }
 
     #[test]
+    fn a_track_count_is_only_a_change_when_both_sides_are_known() {
+        let mut e = entry("p1", ItemState::Complete);
+        e.tracks = Some(9);
+
+        assert!(track_count_changed(&e, Some(10)));
+        assert!(!track_count_changed(&e, Some(9)));
+        // A row written before the count was recorded has nothing to compare,
+        // and treating that as a change would re-download the whole library on
+        // the first run after an upgrade.
+        assert!(!track_count_changed(&e, None));
+        let unknown = entry("p2", ItemState::Complete);
+        assert!(!track_count_changed(&unknown, Some(10)));
+    }
+
+    #[test]
+    fn a_missing_track_count_is_filled_in_and_a_known_one_is_left_alone() {
+        let dir = temp_dir("tracks");
+        let state = State::open(&dir.join(STATE_FILENAME)).unwrap();
+
+        let fresh = entry("p1", ItemState::Complete);
+        assert_eq!(fresh.tracks, None);
+        state.upsert(&fresh).unwrap();
+
+        state.record_track_count("p1", 9).unwrap();
+        assert_eq!(state.get("p1").unwrap().unwrap().tracks, Some(9));
+
+        // A count that is already recorded belongs to the content on disk. The
+        // difference from a later listing is what marks the release as changed,
+        // so it must survive.
+        state.record_track_count("p1", 11).unwrap();
+        assert_eq!(state.get("p1").unwrap().unwrap().tracks, Some(9));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_older_database_gains_the_track_count_column() {
+        let dir = temp_dir("migration");
+        let path = dir.join(STATE_FILENAME);
+        {
+            let conn = Connection::open(&path).unwrap();
+            // The schema as it stood before this column existed, with a row in
+            // it: `CREATE TABLE IF NOT EXISTS` would leave all of this alone.
+            conn.execute_batch(
+                "CREATE TABLE items (
+                     id             TEXT PRIMARY KEY NOT NULL,
+                     artist         TEXT,
+                     title          TEXT,
+                     release_year   TEXT,
+                     format         TEXT,
+                     state          TEXT NOT NULL,
+                     size_mb        TEXT,
+                     content_length INTEGER,
+                     description    TEXT NOT NULL DEFAULT '',
+                     downloaded_at  TEXT,
+                     checked_at     TEXT
+                 );
+                 CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+                 INSERT INTO items (id, state, size_mb) VALUES ('p1', 'complete', '612.34');",
+            )
+            .unwrap();
+        }
+
+        let state = State::open(&path).unwrap();
+        let old = state.get("p1").unwrap().unwrap();
+        assert_eq!(old.tracks, None);
+        assert_eq!(old.size_mb.as_deref(), Some("612.34"));
+        assert!(!track_count_changed(&old, Some(12)));
+
+        // The added column is usable.
+        state.record_track_count("p1", 12).unwrap();
+        assert_eq!(state.get("p1").unwrap().unwrap().tracks, Some(12));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_transient_unavailable_does_not_demote_a_downloaded_release() {
         let dir = temp_dir("demote");
         let state = State::open(&dir.join(STATE_FILENAME)).unwrap();
@@ -729,6 +874,7 @@ mod tests {
             "flac",
             Some("612.34".to_string()),
             Some(1_000),
+            Some(9),
             false,
             now,
         );
@@ -768,6 +914,7 @@ mod tests {
             "flac",
             Some("612.34".to_string()),
             Some(642_000_000),
+            Some(12),
             false,
             now,
         );
@@ -777,6 +924,7 @@ mod tests {
         assert_eq!(read.state, ItemState::Complete);
         assert_eq!(read.size_mb.as_deref(), Some("612.34"));
         assert_eq!(read.content_length, Some(642_000_000));
+        assert_eq!(read.tracks, Some(12));
         assert_eq!(read.format.as_deref(), Some("flac"));
 
         // A second upsert for the same release must update in place.
@@ -788,6 +936,7 @@ mod tests {
             "flac",
             Some("700.00".to_string()),
             Some(734_000_000),
+            Some(13),
             false,
             now,
         );
