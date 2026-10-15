@@ -48,6 +48,8 @@ and this project adheres to
 - `release` accepts an album or track page URL, and looks it up in your
   collection to find the purchase behind it, so a re-download can start from a
   link you already have.
+- Detect the logged-in fan's username from your Bandcamp cookies when `run` is
+  given neither a username nor `BS_USER`.
 
 ### Changed
 
@@ -67,6 +69,16 @@ and this project adheres to
   library's ownership.
 - Download releases newest purchase first, so `--limit` takes the most
   recently bought ones. Releases with no readable purchase date come last.
+- Build through a native `package.nix` Rust builder and a nixpkgs development
+  toolchain from the same lock, instead of the Fenix/naersk cross-compilation
+  matrix. The flake builds natively for the systems it lists.
+
+### Removed
+
+- Drop Intel macOS builds from CI, Nix and the release binaries. macOS builds now
+  target Apple Silicon only.
+- Drop the flake's cross-compilation outputs, which built every target from every
+  host.
 
 ### Fixed
 
