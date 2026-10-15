@@ -39,6 +39,13 @@ pub struct Item {
     /// missing date rather than a reason to reject the whole page.
     #[serde(default)]
     pub purchased: Option<String>,
+    /// How many tracks of this release Bandcamp has audio for right now.
+    ///
+    /// For a pre-order that is the tracks published so far, so an artist adding
+    /// tracks raises it. A release whose count changed has changed, and the
+    /// listing a run fetches anyway reports it for every purchase.
+    #[serde(default)]
+    pub num_streamable_tracks: Option<u32>,
 }
 
 #[derive(Deserialize, Debug)]

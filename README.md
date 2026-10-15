@@ -52,6 +52,9 @@ Options:
   -F, --force                   Ignores all recorded state and downloads every release again [env: BS_FORCE=]
       --recheck-after <DAYS>    Re-check an already-downloaded release for an in-place update once this many days have passed since it was last checked [env: BS_RECHECK_AFTER=]
       --recheck-all             Re-check every downloaded release during this run, downloading only the ones whose advertised size changed. Cheaper than `--force`, which re-downloads unconditionally [env: BS_RECHECK_ALL=]
+      --preorder-after-minutes <MINUTES>
+                                Compare a release Bandcamp still lists as a preorder this many minutes after its last comparison [env: BS_PREORDER_AFTER_MINUTES=] [default: 360]
+      --preorder-checks <N>     Most preorder comparisons to make in one run [env: BS_PREORDER_CHECKS=] [default: 50]
   -j, --jobs <JOBS>             The amount of parallel jobs (threads) to use [env: BS_JOBS=] [default: 4]
   -n, --limit <LIMIT>           Maximum number of releases to process, newest purchase first. Useful for testing [env: BS_LIMIT=]
       --no-wait                 Fail immediately instead of waiting when another run holds the lock [env: BS_NO_WAIT=]
@@ -124,11 +127,29 @@ to download them again; the `{id}` in the default layout keeps them separate.
 Bandcamp does not change a purchase ID when an artist replaces a release's
 audio, and a pre-order turns into a full download without the purchase changing
 either. For each release, Bandsnatch records the archive size Bandcamp advertises
-for the format you downloaded, alongside the number of bytes it transferred.
+for the format you downloaded, the number of tracks Bandcamp had audio for, and
+the number of bytes it transferred.
 
+- **A release that gained or lost tracks is downloaded again.** The collection
+  listing reports a track count for every purchase, and a run fetches that
+  listing anyway, so comparing it costs no request. This is what picks up the
+  tracks an artist adds during a pre-order window, and a bonus track added to an
+  album that was finished years ago.
 - **Pre-orders are re-checked automatically.** A release downloaded while
-  Bandcamp still reported it as a pre-order is retried on every run until
-  Bandcamp stops saying pre-order, at which point the full release is fetched.
+  Bandcamp still reported it as a pre-order is compared again until Bandcamp
+  stops saying pre-order, at which point the full release is fetched. Preorder
+  status also comes from the listing, so waiting for a release costs nothing
+  extra either.
+- **`--preorder-after-minutes MINUTES`** (default 360) sets how long to wait
+  before comparing a release that is still a pre-order. That comparison reads
+  the advertised archive size, which notices a change the track count does not,
+  such as a track being replaced. It is separate from the run interval on
+  purpose: a run every fifteen minutes would otherwise mean 96 requests a day
+  for each pre-order. `0` compares on every run.
+- **`--preorder-checks N`** (default 50) caps how many pre-order comparisons one
+  run makes. Releases are walked newest purchase first, so when more fall due
+  than fit, the most recently bought are compared and the rest wait for the next
+  run. `0` turns pre-order comparisons off.
 - **`--recheck-after DAYS`** re-checks a release once that many days have passed
   since it was last checked, and re-downloads only those whose advertised size
   changed. This costs one request per due release, and no transfer for releases
@@ -136,9 +157,14 @@ for the format you downloaded, alongside the number of bytes it transferred.
 - **`--recheck-all`** does the same for every release in one pass.
 - **`--force`** re-downloads everything unconditionally, without comparing.
 
-A re-check needs the release's download page to read the advertised size, so one
-request per due release is unavoidable: the URLs Bandcamp hands out are signed
-and rotate, so there is no cheaper stable signal to compare.
+The archive size can only be read from a release's download page, so that
+comparison costs one request per due release. It is the only way to notice
+content that changed without the track count moving.
+
+A library downloaded before the track count was recorded has none for any
+release. The first run after an upgrade fills them in from the listing as it
+walks the collection, and downloads nothing: there is nothing to compare them
+against yet, and re-downloading everything to find out would be a poor trade.
 
 ## Re-downloading a single release
 

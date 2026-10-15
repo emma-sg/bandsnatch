@@ -16,6 +16,17 @@ and this project adheres to
 - Detect releases whose audio was replaced after purchase: the advertised
   archive size and the transferred byte count are recorded, and
   `--recheck-after` / `--recheck-all` re-download only what changed.
+- Download a release again when its track count moves. The collection listing a
+  run fetches anyway reports the count for every purchase, so tracks an artist
+  adds during a pre-order window, or a bonus track added to an old album, are
+  noticed with no request and without waiting for the release date. A library
+  downloaded before this was recorded has its counts filled in on the next run
+  without downloading anything.
+- Compare a release that is still a pre-order on its own interval
+  (`--preorder-after-minutes`, default 360), so tracks added during the
+  pre-order window are picked up before the release date, and cap how many of
+  those comparisons one run makes (`--preorder-checks`, default 50) so a large
+  collection does not turn into a burst of requests.
 - Add the `release` subcommand, which re-downloads a single release by
   sale-item key or download URL, bypassing the state cache.
 - Add `--album-path` to configure the output folder layout. For example,
