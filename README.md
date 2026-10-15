@@ -328,7 +328,7 @@ bandsnatch will try to automatically load the cookies from there if possible
 
 Binary builds of Bandsnatch are available on our
 [releases page](https://github.com/Ovyerus/bandsnatch/releases) for Windows, Mac
-(Apple Silicon), and Linux (various architectures).
+(Apple Silicon), and Linux (x86_64).
 
 ### Nix flake
 
@@ -343,8 +343,8 @@ nix shell github:ovyerus/bandsnatch
 You can install it permanently with `nix profile install`, or by adding it to
 your NixOS/Home Manager configuration.
 
-The flake builds natively for Apple Silicon macOS and for x86_64 and aarch64
-Linux. Linux binaries link musl statically, so they need nothing from the host.
+The flake builds natively for Apple Silicon macOS and x86_64 Linux. Linux
+binaries link musl statically, so they need nothing from the host.
 macOS binaries link `libiconv` statically and nothing else beyond Apple's own
 libraries and frameworks.
 

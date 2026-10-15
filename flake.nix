@@ -4,7 +4,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = {nixpkgs, ...}: let
-    systems = ["aarch64-darwin" "aarch64-linux" "x86_64-linux"];
+    systems = ["aarch64-darwin" "x86_64-linux"];
     forSystems = nixpkgs.lib.genAttrs systems;
   in {
     packages = forSystems (system: let

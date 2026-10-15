@@ -25,6 +25,6 @@ in
       inherit (manifest.package) description homepage;
       license = lib.licenses.mit;
       mainProgram = "bandsnatch";
-      platforms = ["aarch64-darwin" "aarch64-linux" "x86_64-linux"];
+      platforms = ["aarch64-darwin" "x86_64-linux"];
     };
   }

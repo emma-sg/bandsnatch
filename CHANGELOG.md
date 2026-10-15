@@ -79,6 +79,7 @@ and this project adheres to
   target Apple Silicon only.
 - Drop the flake's cross-compilation outputs, which built every target from every
   host.
+- Drop the aarch64 Linux build from CI, the flake and the release binaries.
 
 ### Fixed
 

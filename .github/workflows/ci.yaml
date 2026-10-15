@@ -11,15 +11,7 @@ on:
 
 jobs:
   build-linux:
-    strategy:
-      matrix:
-        platform:
-          - name: x86_64
-            runs-on: ubuntu-latest
-          - name: aarch64
-            runs-on: [self-hosted, linux, ARM64]
-
-    runs-on: ${{ matrix.platform.runs-on }}
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -46,10 +38,10 @@ jobs:
           "$binary" --help
           EOF
 
-      - name: Upload ${{ matrix.platform.name }}
+      - name: Upload x86_64
         uses: actions/upload-artifact@v4
         with:
-          name: bandsnatch-linux-${{ matrix.platform.name }}
+          name: bandsnatch-linux-x86_64
           path: ./result/bin/bandsnatch
 
   build-macos-arm:
@@ -127,7 +119,6 @@ jobs:
             "windows-x86_64"
             "macos-aarch64"
             "linux-x86_64"
-            "linux-aarch64"
           )
 
           for target in "${arr[@]}"
