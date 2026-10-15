@@ -52,6 +52,9 @@ Options:
   -F, --force                   Ignores all recorded state and downloads every release again [env: BS_FORCE=]
       --recheck-after <DAYS>    Re-check an already-downloaded release for an in-place update once this many days have passed since it was last checked [env: BS_RECHECK_AFTER=]
       --recheck-all             Re-check every downloaded release during this run, downloading only the ones whose advertised size changed. Cheaper than `--force`, which re-downloads unconditionally [env: BS_RECHECK_ALL=]
+      --preorder-after-minutes <MINUTES>
+                                Compare a release Bandcamp still lists as a preorder this many minutes after its last comparison [env: BS_PREORDER_AFTER_MINUTES=] [default: 360]
+      --preorder-checks <N>     Most preorder comparisons to make in one run [env: BS_PREORDER_CHECKS=] [default: 50]
   -j, --jobs <JOBS>             The amount of parallel jobs (threads) to use [env: BS_JOBS=] [default: 4]
   -n, --limit <LIMIT>           Maximum number of releases to process, newest purchase first. Useful for testing [env: BS_LIMIT=]
       --no-wait                 Fail immediately instead of waiting when another run holds the lock [env: BS_NO_WAIT=]
@@ -127,8 +130,19 @@ either. For each release, Bandsnatch records the archive size Bandcamp advertise
 for the format you downloaded, alongside the number of bytes it transferred.
 
 - **Pre-orders are re-checked automatically.** A release downloaded while
-  Bandcamp still reported it as a pre-order is retried on every run until
-  Bandcamp stops saying pre-order, at which point the full release is fetched.
+  Bandcamp still reported it as a pre-order is compared again until Bandcamp
+  stops saying pre-order, at which point the full release is fetched. That check
+  reads preorder status from the collection listing, which a run fetches anyway,
+  so waiting for a release costs nothing extra.
+- **`--preorder-after-minutes MINUTES`** (default 360) sets how long to wait
+  before comparing a release that is still a pre-order, so tracks added during
+  the pre-order window are picked up before the release date. This is separate
+  from the run interval on purpose: a run every fifteen minutes would otherwise
+  mean 96 requests a day for each pre-order. `0` compares on every run.
+- **`--preorder-checks N`** (default 50) caps how many pre-order comparisons one
+  run makes. Releases are walked newest purchase first, so when more fall due
+  than fit, the most recently bought are compared and the rest wait for the next
+  run. `0` turns pre-order comparisons off.
 - **`--recheck-after DAYS`** re-checks a release once that many days have passed
   since it was last checked, and re-downloads only those whose advertised size
   changed. This costs one request per due release, and no transfer for releases

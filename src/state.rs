@@ -175,6 +175,18 @@ impl StateEntry {
             checked_at: Some(now.to_rfc3339()),
         }
     }
+
+    /// When this release was last looked at and found unchanged.
+    ///
+    /// `None` covers both a row that was never compared and one whose recorded
+    /// timestamp cannot be read. Callers treat either as due, so a damaged value
+    /// costs one comparison rather than hiding a release for good.
+    pub fn last_checked(&self) -> Option<DateTime<Utc>> {
+        let raw = self.checked_at.as_deref()?;
+        DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&Utc))
+    }
 }
 
 /// What to do with a release during a run.
@@ -200,6 +212,15 @@ pub struct RecheckPolicy {
     /// Re-check a downloaded release once this many days have passed since it
     /// was last checked.
     pub after_days: Option<i64>,
+    /// Compare a release that Bandcamp still lists as a preorder once this many
+    /// minutes have passed since its last comparison.
+    ///
+    /// Preorders gain tracks while the purchase itself stays the same, so they
+    /// are compared on their own interval. Runs can be far more frequent than
+    /// comparisons should be: a run every 15 minutes would otherwise mean 96
+    /// requests a day for each preorder. `None` turns preorder comparisons off,
+    /// leaving them to `after_days`.
+    pub preorder_after_minutes: Option<i64>,
 }
 
 impl RecheckPolicy {
@@ -218,26 +239,53 @@ impl RecheckPolicy {
         if entry.state.needs_download(is_preorder) {
             return Action::Download;
         }
-        if self.is_due(entry, now) {
+        if self.is_preorder_due(entry, is_preorder, now) || self.is_due(entry, now) {
             return Action::Recheck;
         }
         Action::Skip
     }
 
-    fn is_due(&self, entry: &StateEntry, now: DateTime<Utc>) -> bool {
-        let Some(after_days) = self.after_days else {
+    /// Whether a release Bandcamp still lists as a preorder is due for another
+    /// comparison.
+    ///
+    /// Public so a caller can tell a preorder comparison apart from one the
+    /// recheck window asked for, which is what decides whether it counts against
+    /// a run's budget for them.
+    pub fn is_preorder_due(
+        &self,
+        entry: &StateEntry,
+        is_preorder: bool,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if entry.state != ItemState::Preorder || !is_preorder {
+            return false;
+        }
+        let Some(minutes) = self.preorder_after_minutes else {
             return false;
         };
-        // Entries with no check timestamp are either freshly imported from the
-        // legacy cache or predate fingerprinting, so they are always due.
-        let Some(checked_at) = entry
-            .checked_at
-            .as_deref()
-            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
-        else {
-            return true;
-        };
-        now.signed_duration_since(checked_at.with_timezone(&Utc)) >= Duration::days(after_days)
+        is_due_once(entry.last_checked(), now, Duration::minutes(minutes))
+    }
+
+    fn is_due(&self, entry: &StateEntry, now: DateTime<Utc>) -> bool {
+        match self.after_days {
+            Some(days) => is_due_once(entry.last_checked(), now, Duration::days(days)),
+            None => false,
+        }
+    }
+}
+
+/// Whether enough time has passed since `last_checked` for another comparison.
+///
+/// A release that was never compared - one imported from the legacy cache, or
+/// one recorded before fingerprints existed - is due now.
+fn is_due_once(
+    last_checked: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    interval: Duration,
+) -> bool {
+    match last_checked {
+        Some(checked) => now.signed_duration_since(checked) >= interval,
+        None => true,
     }
 }
 
@@ -582,6 +630,7 @@ mod tests {
         let policy = RecheckPolicy {
             force: false,
             after_days: Some(7),
+            preorder_after_minutes: None,
         };
 
         // Unknown release: always download.
@@ -609,8 +658,47 @@ mod tests {
         let forced = RecheckPolicy {
             force: true,
             after_days: None,
+            preorder_after_minutes: None,
         };
         assert_eq!(forced.decide(Some(&fresh), false, now), Action::Download);
+    }
+
+    #[test]
+    fn a_preorder_is_compared_on_its_own_interval() {
+        let now = Utc::now();
+        let policy = RecheckPolicy {
+            force: false,
+            after_days: None,
+            preorder_after_minutes: Some(360),
+        };
+
+        // Downloaded a moment ago, so there is nothing new to find yet.
+        let mut fresh = entry("p1", ItemState::Preorder);
+        fresh.checked_at = Some(now.to_rfc3339());
+        assert_eq!(policy.decide(Some(&fresh), true, now), Action::Skip);
+
+        // Compared longer ago than the interval.
+        let mut stale = entry("p2", ItemState::Preorder);
+        stale.checked_at = Some((now - Duration::minutes(361)).to_rfc3339());
+        assert_eq!(policy.decide(Some(&stale), true, now), Action::Recheck);
+
+        // Never compared, as after a legacy cache import.
+        let never = entry("p3", ItemState::Preorder);
+        assert_eq!(policy.decide(Some(&never), true, now), Action::Recheck);
+
+        // The preorder interval says nothing about a finished release: without
+        // a recheck window there is still nothing to do.
+        let mut complete = entry("p4", ItemState::Complete);
+        complete.checked_at = Some((now - Duration::days(400)).to_rfc3339());
+        assert_eq!(policy.decide(Some(&complete), false, now), Action::Skip);
+
+        // Switched off, so a preorder is left to the recheck window.
+        let off = RecheckPolicy {
+            force: false,
+            after_days: None,
+            preorder_after_minutes: None,
+        };
+        assert_eq!(off.decide(Some(&stale), true, now), Action::Skip);
     }
 
     #[test]

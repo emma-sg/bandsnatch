@@ -29,6 +29,35 @@ struct Work {
     action: Action,
 }
 
+/// How many preorder comparisons one run may make.
+///
+/// Preorders are compared on the interval in `RecheckPolicy`, so this is only
+/// reached when many fall due together, such as the first run over a large
+/// collection. Comparisons that do not fit stay due for a later run.
+#[derive(Clone, Copy, Debug)]
+struct PreorderBudget(usize);
+
+impl PreorderBudget {
+    fn new(max: usize) -> Self {
+        Self(max)
+    }
+
+    /// Whether one more comparison fits, taking it when it does.
+    ///
+    /// A comparison the recheck window asked for is never held back: that work
+    /// was asked for on this run.
+    fn take(&mut self, is_preorder_check: bool) -> bool {
+        if !is_preorder_check {
+            return true;
+        }
+        if self.0 == 0 {
+            return false;
+        }
+        self.0 -= 1;
+        true
+    }
+}
+
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     #[command(flatten)]
@@ -71,6 +100,39 @@ pub struct Args {
     /// re-downloads unconditionally.
     #[arg(long, env = "BS_RECHECK_ALL")]
     recheck_all: bool,
+
+    /// Compare a release Bandcamp still lists as a preorder this many minutes
+    /// after its last comparison.
+    ///
+    /// A preorder gains tracks while the purchase itself stays the same, so it
+    /// is compared on its own schedule rather than the `--recheck-after` window.
+    /// Runs can happen far more often than comparisons should: at a run every 15
+    /// minutes, comparing on every run would mean 96 requests a day for each
+    /// preorder. `0` compares them on every run.
+    ///
+    /// Bounded to reject negatives and values large enough to overflow chrono's
+    /// `Duration::minutes`, which panics; a year is well past any useful value.
+    #[arg(
+        long,
+        value_name = "MINUTES",
+        default_value_t = 360,
+        env = "BS_PREORDER_AFTER_MINUTES",
+        value_parser = clap::value_parser!(i64).range(0..=525_600)
+    )]
+    preorder_after_minutes: i64,
+
+    /// Most preorder comparisons to make in one run.
+    ///
+    /// Only reached when many preorders fall due together. Comparisons that do
+    /// not fit are left for a later run, so none is skipped permanently. `0`
+    /// turns preorder comparisons off.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 50,
+        env = "BS_PREORDER_CHECKS"
+    )]
+    preorder_checks: usize,
 
     /// The amount of parallel jobs (threads) to use.
     ///
@@ -122,6 +184,8 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         force,
         recheck_after,
         recheck_all,
+        preorder_after_minutes,
+        preorder_checks,
         jobs,
         limit,
         user,
@@ -138,6 +202,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let policy = RecheckPolicy {
         force,
         after_days: if recheck_all { Some(0) } else { recheck_after },
+        preorder_after_minutes: Some(preorder_after_minutes),
     };
 
     let download_urls = context
@@ -161,6 +226,7 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let mut to_download = 0usize;
         let mut to_recheck = 0usize;
         let mut up_to_date = 0usize;
+        let mut budget = PreorderBudget::new(preorder_checks);
 
         for (id, download) in download_urls {
             if items.len() >= limit {
@@ -178,6 +244,20 @@ pub fn command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
                 Action::Recheck => {
+                    // Preorder comparisons are the ones a run budgets for. The
+                    // listing is walked newest first, so when more fall due than
+                    // fit, the most recently bought are the ones compared, and
+                    // the rest are due again on the next run.
+                    let is_preorder_check = entry.as_ref().is_some_and(|entry| {
+                        policy.is_preorder_due(entry, download.is_preorder, now)
+                    });
+                    if !budget.take(is_preorder_check) {
+                        debug!(
+                            "{id} is due for a preorder comparison, but this run's budget is spent"
+                        );
+                        up_to_date += 1;
+                        continue;
+                    }
                     to_recheck += 1;
                     items.push(Work {
                         id,
@@ -512,5 +592,20 @@ mod tests {
 
         let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["p1", "p9"]);
+    }
+
+    #[test]
+    fn the_preorder_budget_only_holds_back_preorder_comparisons() {
+        // Switched off: no preorder is compared, and a comparison the recheck
+        // window asked for still runs.
+        let mut off = PreorderBudget::new(0);
+        assert!(!off.take(true));
+        assert!(off.take(false));
+
+        // One comparison fits, the second is left for a later run.
+        let mut one = PreorderBudget::new(1);
+        assert!(one.take(true));
+        assert!(!one.take(true));
+        assert!(one.take(false));
     }
 }
